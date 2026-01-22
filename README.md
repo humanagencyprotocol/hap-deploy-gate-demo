@@ -1,6 +1,6 @@
 # HAP Deploy Gate Demo
 
-Reference implementation of the Human Agency Protocol v0.2 Deploy Gate Profile.
+A working demo showing how humans stay in control of automated deployments. Before any code ships to production, a human must review the changes, confirm they understand the tradeoffs, and sign off — creating a cryptographic attestation that the deployment system verifies before proceeding.
 
 ## Structure
 
