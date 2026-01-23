@@ -7,13 +7,13 @@ A working demo showing how humans stay in control of automated deployments. Befo
 ```
 demo/
 ├── apps/
-│   ├── ui/           # Local direction UI (Next.js, localhost:3000)
-│   └── server/       # SP + Proxy + /prod (Next.js, Vercel, localhost:3001)
+│   ├── ui/           # Attestation UI (Next.js, localhost:3000)
+│   └── server/       # Service Provider (Next.js, localhost:3001)
 ├── packages/
 │   └── hap-core/     # Shared canonicalization and verification logic
 └── .github/
     └── workflows/
-        └── deploy.yml  # GitHub Actions deploy workflow
+        └── hap-check.yml  # GitHub Actions attestation verification
 ```
 
 ## Quick Start
@@ -25,12 +25,74 @@ pnpm install
 # Build shared package
 pnpm --filter @hap-demo/core build
 
-# Start server (SP + Proxy)
+# Start server (SP)
 pnpm dev:server
 
 # Start UI (separate terminal)
 pnpm dev:ui
 ```
+
+## GitHub Setup
+
+### 1. Set Repository Secrets
+
+Go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Description |
+|--------|-------------|
+| `GITHUB_TOKEN` | Automatically provided by GitHub Actions |
+
+For the UI to post comments, create a `.env.local` in `apps/ui/`:
+```
+GITHUB_TOKEN=<your personal access token with repo scope>
+NEXT_PUBLIC_SP_URL=http://localhost:3001
+```
+
+### 2. Enable Branch Protection (Required for Merge Gate)
+
+To block merges without valid attestations:
+
+1. Go to **Settings → Branches → Add branch ruleset** (or "Add rule" for classic)
+2. Branch name pattern: `main`
+3. Enable: **Require status checks to pass before merging**
+4. Search and select: **Verify HAP Attestation**
+5. Save changes
+
+Without this, the workflow will report status but won't block merges.
+
+## Demo Flow
+
+### Single Approval (Canary Path)
+
+1. Create a PR to the `main` branch
+2. Run `pnpm dev:server` and `pnpm dev:ui`
+3. Open http://localhost:3000
+4. Enter the PR URL and click "Load PR"
+5. Select **Canary (gradual rollout)** execution path
+6. Review changes and check the confirmation boxes
+7. Select **Engineering** role
+8. Click "Request Attestation"
+9. Click "Post Attestation to PR" to add it as a PR comment
+10. The GitHub Action will verify the attestation and allow merge
+
+### Multi-Person Approval (Full Path)
+
+For production deployments requiring multiple approvals:
+
+1. Create a PR and select **Full (immediate deployment)** path
+2. **Engineer** goes through the UI:
+   - Select role: **Engineering**
+   - Complete attestation and post to PR
+3. **Release Manager** goes through the UI separately:
+   - Select role: **Release Management**
+   - Complete attestation and post as another PR comment
+4. GitHub Action verifies both attestations are present and valid
+5. Merge is allowed only when all required roles have attested
+
+| Execution Path | Required Approvals |
+|---------------|-------------------|
+| Canary | Engineering only |
+| Full | Engineering + Release Management |
 
 ## Endpoints
 
@@ -38,50 +100,30 @@ pnpm dev:ui
 
 - `GET /api/sp/pubkey` - Get SP public key
 - `POST /api/sp/attest` - Request attestation
+- `POST /api/sp/verify` - Verify attestation signature
 
-### Executor Proxy
+### Attestation UI
 
-- `POST /api/proxy/execute/deploy` - Execute deploy (requires bearer token)
-
-### Production State
-
-- `GET /prod` - View current prod state (HTML)
-- `GET /prod.json` - View current prod state (JSON)
+- `GET /` - Attestation wizard
+- `POST /api/attest` - Request attestation (proxies to SP)
+- `POST /api/comment` - Post attestation to PR
+- `GET /api/comments` - Fetch PR comments
 
 ## Environment Variables
 
-### Server (Vercel)
+### Server
 
 ```
-SP_PRIVATE_KEY=<hex>     # Ed25519 private key
+SP_PRIVATE_KEY=<hex>     # Ed25519 private key (optional, generates ephemeral if not set)
 SP_PUBLIC_KEY=<hex>      # Ed25519 public key
-HAP_PROXY_TOKEN=<token>  # Bearer token for proxy auth
-KV_REST_API_URL=<url>    # Vercel KV (optional, uses memory store locally)
-KV_REST_API_TOKEN=<token>
 ```
 
-### UI (Local)
+### UI
 
 ```
-GITHUB_TOKEN=<token>     # For posting PR comments
+GITHUB_TOKEN=<token>     # For posting/reading PR comments
 NEXT_PUBLIC_SP_URL=http://localhost:3001
 ```
-
-### GitHub Actions
-
-```
-HAP_PROXY_URL=https://your-deployment.vercel.app
-HAP_PROXY_TOKEN=<same as server>
-```
-
-## Demo Flow
-
-1. Open a PR in your repo
-2. Run `pnpm dev:server` and `pnpm dev:ui`
-3. Use the UI to create an attestation for the PR
-4. Attestation is posted as a PR comment
-5. Trigger the deploy workflow with the PR number
-6. View the updated `/prod` page
 
 ## Protocol Compliance
 
@@ -89,7 +131,8 @@ This demo implements:
 
 - **Deploy Gate Profile v0.2** - Frame canonicalization, Decision Owner scopes
 - **Attestation format** - Ed25519 signatures, TTL enforcement
-- **Proxy validation** - Frame hash recomputation, signature verification
+- **Multi-person approval** - Role-based attestations aggregated by workflow
+- **Cryptographic verification** - Signature verification via deployed service
 - **Error codes** - INVALID_SIGNATURE, EXPIRED, FRAME_MISMATCH, etc.
 
-See [Deploy Gate Profile](/content/0.2/deploy-gate-profile.md) for full specification.
+See [Human Agency Protocol](https://humanagencyprotocol.org) for full specification.
