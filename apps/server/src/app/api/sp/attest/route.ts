@@ -5,26 +5,33 @@ import { encodeAttestationBlob } from '@hap-demo/core';
 
 interface AttestRequestBody extends AttestationRequest {}
 
+/**
+ * Validate that provided scopes are valid for the execution path.
+ * For multi-person approval, we allow partial coverage - each attestation
+ * covers one or more scopes, and the workflow aggregates them.
+ */
 function validateScopes(
   scopes: DecisionOwnerScope[],
-  requiredScopes: readonly { domain: string; env: string }[]
-): { valid: boolean; missing?: { domain: string; env: string } } {
-  for (const required of requiredScopes) {
-    const found = scopes.some(
-      (s) =>
-        s.domain === required.domain &&
-        s.env === required.env
+  allowedScopes: readonly { domain: string; env: string }[]
+): { valid: boolean; invalid?: DecisionOwnerScope } {
+  // Check that each provided scope is one of the allowed scopes for this path
+  for (const scope of scopes) {
+    const isAllowed = allowedScopes.some(
+      (allowed) =>
+        allowed.domain === scope.domain &&
+        allowed.env === scope.env
     );
-    if (!found) {
-      // Check for alternative domains (security can substitute for release_management)
-      if (required.domain === 'release_management') {
-        const hasAlternative = scopes.some(
-          (s) => s.domain === 'security' && s.env === required.env
-        );
-        if (hasAlternative) continue;
-      }
-      return { valid: false, missing: required };
+    // Also allow security to substitute for release_management
+    const isAlternative = scope.domain === 'security' &&
+      allowedScopes.some(a => a.domain === 'release_management' && a.env === scope.env);
+
+    if (!isAllowed && !isAlternative) {
+      return { valid: false, invalid: scope };
     }
+  }
+  // Must provide at least one scope
+  if (scopes.length === 0) {
+    return { valid: false };
   }
   return { valid: true };
 }
@@ -75,17 +82,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate Decision Owner scopes
+    // Validate Decision Owner scopes - check that provided scopes are valid for this path
     const pathConfig = PROFILE_CONFIG.executionPaths[body.execution_path as ExecutionPath];
     const scopeValidation = validateScopes(body.decision_owner_scopes, pathConfig.requiredScopes);
     if (!scopeValidation.valid) {
       return NextResponse.json(
         {
           error: 'INVALID_REQUEST',
-          reason: 'SCOPE_INSUFFICIENT',
+          reason: 'SCOPE_INVALID',
           details: {
             execution_path: body.execution_path,
-            missing_scope: scopeValidation.missing,
+            invalid_scope: scopeValidation.invalid,
+            allowed_scopes: pathConfig.requiredScopes,
           },
         },
         { status: 400 }
