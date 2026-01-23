@@ -62,8 +62,8 @@ export const PROFILE_CONFIG = {
     },
   },
   ttl: {
-    default: 120, // Demo uses 120s for quick expiry demonstration
-    max: 3600,
+    default: 3600, // 1 hour default TTL
+    max: 86400, // 24 hour max
   },
 } as const;
 
