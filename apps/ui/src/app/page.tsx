@@ -264,6 +264,14 @@ export default function Home() {
   const [commentUrl, setCommentUrl] = useState<string | null>(null);
   const [executorOutput, setExecutorOutput] = useState<string | null>(null);
 
+  // Feedback (post-execution, non-protocol)
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [feedbackAnswers, setFeedbackAnswers] = useState({
+    objectiveAchieved: '',
+    tradeoffsAcceptable: '',
+    surprised: '',
+  });
+
   // Determine required roles based on execution path
   const requiredRoles: Role[] = executionPath === 'full'
     ? ['engineering', 'release_management']
@@ -1092,6 +1100,85 @@ blob=${attestationResult.attestation}
               }}>
                 {executorOutput}
               </pre>
+            )}
+          </div>
+
+          {/* Feedback Blueprint (Post-Execution, Non-Protocol) */}
+          <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #eee' }}>
+            <h3>Feedback (Optional)</h3>
+            <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+              Support learning without affecting authorization. This feedback:
+            </p>
+            <ul style={{ fontSize: '0.85rem', color: '#888', marginBottom: '1rem', paddingLeft: '1.5rem' }}>
+              <li>Is optional and human-controlled</li>
+              <li>Never fed into SDGs automatically</li>
+              <li>Never affects future execution</li>
+              <li>Stored locally, not correlated with attestations</li>
+            </ul>
+
+            {!feedbackSubmitted ? (
+              <div style={{ backgroundColor: '#fafafa', padding: '1rem', borderRadius: '4px' }}>
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    Was your objective achieved?
+                  </label>
+                  <select
+                    value={feedbackAnswers.objectiveAchieved}
+                    onChange={(e) => setFeedbackAnswers(prev => ({ ...prev, objectiveAchieved: e.target.value }))}
+                    style={{ ...styles.input, maxWidth: '300px' }}
+                  >
+                    <option value="">Select...</option>
+                    <option value="yes">Yes</option>
+                    <option value="partially">Partially</option>
+                    <option value="no">No</option>
+                    <option value="unknown">Too early to tell</option>
+                  </select>
+                </div>
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    Were the tradeoffs acceptable?
+                  </label>
+                  <select
+                    value={feedbackAnswers.tradeoffsAcceptable}
+                    onChange={(e) => setFeedbackAnswers(prev => ({ ...prev, tradeoffsAcceptable: e.target.value }))}
+                    style={{ ...styles.input, maxWidth: '300px' }}
+                  >
+                    <option value="">Select...</option>
+                    <option value="yes">Yes, as expected</option>
+                    <option value="better">Better than expected</option>
+                    <option value="worse">Worse than expected</option>
+                    <option value="different">Different than expected</option>
+                  </select>
+                </div>
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    What surprised you?
+                  </label>
+                  <textarea
+                    value={feedbackAnswers.surprised}
+                    onChange={(e) => setFeedbackAnswers(prev => ({ ...prev, surprised: e.target.value }))}
+                    placeholder="Optional: note any surprises or learnings..."
+                    style={{ ...styles.input, minHeight: '60px', resize: 'vertical' }}
+                  />
+                </div>
+
+                <button
+                  style={styles.buttonSecondary}
+                  onClick={() => {
+                    // In a real implementation, this would save locally
+                    console.log('Feedback (stored locally only):', feedbackAnswers);
+                    setFeedbackSubmitted(true);
+                  }}
+                >
+                  Save Feedback Locally
+                </button>
+              </div>
+            ) : (
+              <div style={styles.success}>
+                Feedback saved locally. Thank you for reflecting on this deployment.
+              </div>
             )}
           </div>
 
