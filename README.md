@@ -2,6 +2,52 @@
 
 A working demo showing how humans stay in control of automated deployments. Before any code ships to production, a human must review the changes, confirm they understand the tradeoffs, and sign off — creating a cryptographic attestation that the deployment system verifies before proceeding.
 
+## How It Works
+
+This demo implements a **human checkpoint for code deployment**. Before any PR can be merged, a human must review the changes and create a cryptographic attestation proving they made an informed decision.
+
+### The Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1. DEVELOPER creates PR                                                │
+│     └─→ GitHub Action runs → ❌ Blocks merge (no attestation)          │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│  2. REVIEWER opens attestation UI                                       │
+│     • Loads PR details (title, description, changed files)              │
+│     • Selects execution path: Canary (1 approval) or Full (2 approvals) │
+│     • Reviews actual code changes                                       │
+│     • Confirms understanding via checkboxes:                            │
+│       ☑ I understand the problem being solved                          │
+│       ☑ I understand the objective                                     │
+│       ☑ I accept the tradeoffs                                         │
+│     • Selects their role (Engineering / Release Management)             │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│  3. SERVICE PROVIDER signs attestation                                  │
+│     • Computes frame hash (repo + SHA + env + path)                     │
+│     • Records which gates were passed                                   │
+│     • Signs with Ed25519 key                                            │
+│     • Returns cryptographic blob with 1-hour TTL                        │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│  4. REVIEWER posts attestation as PR comment                            │
+│     └─→ GitHub Action re-runs → Verifies signature → ✅ Allows merge   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### What Gets Verified
+
+The GitHub Action checks:
+- ✓ Attestation exists for the current commit SHA
+- ✓ Cryptographic signature is valid
+- ✓ Attestation hasn't expired
+- ✓ All required roles have attested (Engineering for Canary, Engineering + Release Management for Full)
+
 ## Structure
 
 ```
