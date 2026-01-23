@@ -920,25 +920,74 @@ blob=${attestationResult.attestation}
         </section>
       )}
 
-      {/* Step 6: Confirm & Request Attestation */}
+      {/* Step 6: Pre-Signature Summary */}
       {prDetails && currentStepIndex >= 5 && !roleAlreadyAttested && (
         <section style={step === 'confirm' ? styles.cardActive : styles.card}>
-          <h2>6. Confirm & Request Attestation</h2>
-          <div style={{ backgroundColor: '#f5f5f5', padding: '1rem', borderRadius: '4px', marginBottom: '1rem' }}>
-            <p><strong>Your Role:</strong> {ROLE_INFO[selectedRole].label}</p>
-            <p><strong>Repository:</strong> {prDetails.repo}</p>
-            <p><strong>Commit:</strong> {prDetails.head.sha}</p>
-            <p><strong>Environment:</strong> {targetEnv}</p>
-            <p><strong>Execution Path:</strong> {executionPath}</p>
-            <p><strong>Disclosures:</strong> {selectedFiles.size} files</p>
+          <h2>6. Pre-Signature Summary</h2>
+          <p style={{ fontSize: '0.95rem', color: '#333', marginBottom: '1rem' }}>
+            Review what you are about to sign. This is the boundary between your thinking and the protocol.
+          </p>
+
+          {/* What will be signed - structural only */}
+          <div style={{
+            backgroundColor: '#1a1a2e',
+            color: '#e0e0e0',
+            padding: '1.5rem',
+            borderRadius: '8px',
+            marginBottom: '1.5rem',
+            fontFamily: 'monospace',
+            fontSize: '0.9rem',
+          }}>
+            <p style={{ color: '#4fc3f7', marginBottom: '1rem', fontWeight: 'bold' }}>
+              You are about to sign:
+            </p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Profile:</strong> deploy-gate@0.2</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Repo:</strong> {prDetails.repo}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Commit:</strong> {prDetails.head.sha.slice(0, 12)}...</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Environment:</strong> {targetEnv}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Execution path:</strong> {executionPath === 'canary' ? 'deploy-prod-canary' : 'deploy-prod-full'}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Required scopes:</strong> {selectedRole}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Gates closed:</strong> problem, objective, tradeoff, commitment</p>
           </div>
+
+          {/* Boundary notice */}
+          <div style={{
+            backgroundColor: '#fff8e1',
+            border: '1px solid #ffcc02',
+            padding: '1rem',
+            borderRadius: '4px',
+            marginBottom: '1.5rem',
+          }}>
+            <p style={{ margin: 0, fontWeight: 'bold', color: '#f57c00' }}>
+              Your written inputs will not be transmitted or stored.
+            </p>
+            <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem', color: '#666' }}>
+              Your objective, reasoning, and any notes stay local. Only the structural frame above crosses the boundary.
+            </p>
+          </div>
+
+          {/* SDG warnings reminder if any */}
+          {sdgWarnings.length > 0 && (
+            <div style={styles.warning}>
+              <strong>Proceeding despite warnings:</strong>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.5rem' }}>
+                {sdgWarnings.map(sdg => (
+                  <li key={sdg.id}>{sdg.user_prompt}</li>
+                ))}
+              </ul>
+              <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+                This is your choice. You own this decision.
+              </p>
+            </div>
+          )}
+
           {step === 'confirm' && (
             <button
               style={loading ? styles.buttonDisabled : styles.button}
               onClick={requestAttestation}
               disabled={loading}
             >
-              {loading ? 'Requesting...' : 'Request Attestation'}
+              {loading ? 'Signing...' : 'Sign Attestation'}
             </button>
           )}
         </section>
