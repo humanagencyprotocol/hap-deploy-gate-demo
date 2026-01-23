@@ -18,6 +18,29 @@ demo/
 
 ## Quick Start
 
+### Option A: Use the Public Server (Recommended)
+
+A public Service Provider is available at **https://service.humanagencyprotocol.org** — no server setup required.
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build shared package
+pnpm --filter @hap-demo/core build
+
+# Start UI only
+pnpm dev:ui
+```
+
+Create `apps/ui/.env.local`:
+```
+GITHUB_TOKEN=<your personal access token with repo scope>
+NEXT_PUBLIC_SP_URL=https://service.humanagencyprotocol.org
+```
+
+### Option B: Run Your Own Server
+
 ```bash
 # Install dependencies
 pnpm install
@@ -32,23 +55,15 @@ pnpm dev:server
 pnpm dev:ui
 ```
 
-## GitHub Setup
-
-### 1. Set Repository Secrets
-
-Go to **Settings → Secrets and variables → Actions** and add:
-
-| Secret | Description |
-|--------|-------------|
-| `GITHUB_TOKEN` | Automatically provided by GitHub Actions |
-
-For the UI to post comments, create a `.env.local` in `apps/ui/`:
+Create `apps/ui/.env.local`:
 ```
 GITHUB_TOKEN=<your personal access token with repo scope>
 NEXT_PUBLIC_SP_URL=http://localhost:3001
 ```
 
-### 2. Enable Branch Protection (Required for Merge Gate)
+## GitHub Setup
+
+### 1. Enable Branch Protection (Required for Merge Gate)
 
 To block merges without valid attestations:
 
@@ -59,6 +74,8 @@ To block merges without valid attestations:
 5. Save changes
 
 Without this, the workflow will report status but won't block merges.
+
+> **Note:** The GitHub Action automatically uses `https://service.humanagencyprotocol.org` for attestation verification. No additional configuration is needed.
 
 ## Demo Flow
 
