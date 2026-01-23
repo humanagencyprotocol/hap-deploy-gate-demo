@@ -1,6 +1,8 @@
 # HAP Deploy Gate Demo
 
-A working demo showing how humans stay in control of automated deployments. Before any code ships to production, a human must review the changes, confirm they understand the tradeoffs, and sign off — creating a cryptographic attestation that the deployment system verifies before proceeding.
+As AI becomes capable of writing and shipping code autonomously, we need guardrails that keep humans in the loop — not as a formality, but as genuine decision-makers. This demo shows how: a checkpoint that forces reviewers to engage with changes before signing a cryptographic attestation. The attestation proves not just that someone clicked approve, but that they confirmed understanding of the problem, objective, and tradeoffs.   
+
+The full protocol goes further: domain-specific gates tailored to context, verified identity, integration with deployment systems and AI-assisted review that helps humans understand complex changes — not bypass them.   
 
 ## How It Works
 

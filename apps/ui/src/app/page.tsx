@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { parsePRInput, fetchPRDetails, fetchPRFiles, PRDetails, PRFile } from '../lib/github';
+import { runSDGs, hasHardStop, getHardStops, getWarnings, SDGResult, SDGContext } from '../sdg/runner';
 
 type Step = 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
 type Role = 'engineering' | 'release_management';
@@ -252,6 +253,11 @@ export default function Home() {
   const [problemUnderstood, setProblemUnderstood] = useState(false);
   const [objectiveClear, setObjectiveClear] = useState(false);
   const [tradeoffsAcceptable, setTradeoffsAcceptable] = useState(false);
+  const [objectiveText, setObjectiveText] = useState(''); // User's stated objective
+
+  // SDG Results
+  const [sdgResults, setSdgResults] = useState<SDGResult[]>([]);
+  const [sdgChecked, setSdgChecked] = useState(false);
 
   // Result
   const [attestationResult, setAttestationResult] = useState<AttestationResult | null>(null);
@@ -447,9 +453,68 @@ blob=${attestationResult.attestation}
     }
   }, [prDetails, attestationResult, executionPath, targetEnv, selectedFiles, owner, repo, selectedRole]);
 
+  // Run SDGs before proceeding to confirm
+  const runSDGChecks = useCallback(async () => {
+    if (!prDetails) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Build SDG context from current UI state
+      const context: SDGContext = {
+        // Structural data
+        affected_domains: deriveDomainsFromFiles(prFiles.map(f => f.filename)),
+        declared_decision_owner_scopes: [selectedRole],
+        frame_hashes: [], // Single reviewer for now
+        tradeoff_mode: executionPath,
+        execution_path: executionPath === 'canary' ? 'deploy-prod-canary' : 'deploy-prod-full',
+        // Semantic data
+        objective_text: objectiveText,
+        diff_summary: prFiles.map(f => `${f.status}: ${f.filename}`).join('\n'),
+      };
+
+      // SDG set from profile - hardcoded for demo
+      const sdgSet = [
+        'deploy/missing_decision_owner@1.0',
+        'deploy/commitment_mismatch@1.0',
+        'deploy/tradeoff_execution_mismatch@1.0',
+        'deploy/objective_diff_mismatch@1.0',
+      ];
+
+      const results = await runSDGs(sdgSet, context);
+      setSdgResults(results);
+      setSdgChecked(true);
+
+      // If no hard stops, proceed to confirm
+      if (!hasHardStop(results)) {
+        setStep('confirm');
+      }
+    } catch (err) {
+      setError(`SDG check failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [prDetails, prFiles, selectedRole, executionPath, objectiveText]);
+
+  // Derive domains from file paths (simplified heuristic)
+  function deriveDomainsFromFiles(files: string[]): string[] {
+    const domains = new Set<string>();
+    for (const file of files) {
+      if (file.includes('auth') || file.includes('security')) domains.add('security');
+      if (file.includes('billing') || file.includes('payment')) domains.add('finance');
+      if (file.includes('deploy') || file.includes('infra')) domains.add('infrastructure');
+      // Default: engineering covers everything
+      domains.add('engineering');
+    }
+    return Array.from(domains);
+  }
+
   const currentStepIndex = stepOrder.indexOf(step);
   const allGatesChecked = problemUnderstood && objectiveClear && tradeoffsAcceptable;
   const roleAlreadyAttested = attestedRoles.has(selectedRole);
+  const sdgHardStops = getHardStops(sdgResults);
+  const sdgWarnings = getWarnings(sdgResults);
 
   return (
     <main style={styles.main}>
@@ -746,6 +811,28 @@ blob=${attestationResult.attestation}
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
             As <strong>{ROLE_INFO[selectedRole].label}</strong>, confirm you understand the implications:
           </p>
+
+          {/* Objective Input */}
+          <div style={{ marginBottom: '1.5rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.5rem' }}>
+              <strong>Your Objective</strong>
+              <br />
+              <span style={{ fontSize: '0.85rem', color: '#666' }}>
+                What do you want to achieve with this deployment? (This stays local - never transmitted)
+              </span>
+            </label>
+            <textarea
+              value={objectiveText}
+              onChange={(e) => setObjectiveText(e.target.value)}
+              placeholder="e.g., Fix the authentication bug that causes login failures..."
+              style={{
+                ...styles.input,
+                minHeight: '80px',
+                resize: 'vertical',
+              }}
+            />
+          </div>
+
           <div style={{ marginBottom: '0.75rem' }}>
             <label style={{ display: 'flex', alignItems: 'flex-start' }}>
               <input
@@ -797,13 +884,37 @@ blob=${attestationResult.attestation}
               </span>
             </label>
           </div>
+
+          {/* SDG Results */}
+          {sdgChecked && sdgHardStops.length > 0 && (
+            <div style={styles.error}>
+              <strong>Cannot proceed - integrity issues detected:</strong>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.5rem' }}>
+                {sdgHardStops.map(sdg => (
+                  <li key={sdg.id}>{sdg.user_prompt}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {sdgChecked && sdgWarnings.length > 0 && (
+            <div style={styles.warning}>
+              <strong>Warnings (you may proceed):</strong>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.5rem' }}>
+                {sdgWarnings.map(sdg => (
+                  <li key={sdg.id}>{sdg.user_prompt}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {step === 'gates' && (
             <button
               style={allGatesChecked ? styles.button : styles.buttonDisabled}
-              onClick={() => setStep('confirm')}
-              disabled={!allGatesChecked}
+              onClick={runSDGChecks}
+              disabled={!allGatesChecked || loading}
             >
-              Continue
+              {loading ? 'Checking...' : sdgChecked && sdgHardStops.length === 0 ? 'Continue' : 'Run Integrity Checks'}
             </button>
           )}
         </section>
