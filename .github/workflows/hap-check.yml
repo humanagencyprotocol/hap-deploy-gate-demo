@@ -6,13 +6,16 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+env:
+  HAP_SERVICE_URL: https://service.humanagencyprotocol.org
+
 jobs:
   check_attestation:
     name: Verify HAP Attestation
     if: github.event.pull_request || (github.event.issue.pull_request && contains(github.event.comment.body, 'HAP_ATTESTATION'))
     runs-on: ubuntu-latest
     steps:
-      - name: Check for valid attestation
+      - name: Find and verify attestation
         uses: actions/github-script@v7
         with:
           script: |
@@ -30,8 +33,12 @@ jobs:
             }
 
             const headSha = pr.head.sha;
-            console.log(`Checking attestation for PR #${pr.number}, SHA: ${headSha}`);
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+            console.log(`Checking attestation for PR #${pr.number}`);
+            console.log(`  Repo: ${repo}`);
+            console.log(`  SHA: ${headSha}`);
 
+            // Find attestation in PR comments
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -40,8 +47,7 @@ jobs:
 
             const beginMarker = '---BEGIN HAP_ATTESTATION v=1---';
             const endMarker = '---END HAP_ATTESTATION---';
-            let found = false;
-            let attestationDetails = null;
+            let attestationData = null;
 
             for (const comment of comments.data) {
               const body = comment.body || '';
@@ -59,29 +65,68 @@ jobs:
                 if (eq > 0) data[line.slice(0, eq)] = line.slice(eq + 1);
               }
 
-              console.log(`Found attestation in comment ${comment.id}:`);
-              console.log(`  SHA: ${data.sha}`);
+              console.log(`\nFound attestation in comment ${comment.id}:`);
+              console.log(`  SHA in attestation: ${data.sha}`);
               console.log(`  Profile: ${data.profile}`);
 
-              if (data.sha === headSha) {
-                found = true;
-                attestationDetails = data;
-                console.log(`✓ SHA matches!`);
-                break;
-              } else {
-                console.log(`✗ SHA mismatch (expected ${headSha})`);
+              // Check SHA match first
+              if (data.sha !== headSha) {
+                console.log(`  ✗ SHA mismatch (PR head is ${headSha})`);
+                continue;
               }
+
+              console.log(`  ✓ SHA matches`);
+              attestationData = data;
+              break;
             }
 
-            if (!found) {
-              core.setFailed(`No valid HAP attestation found for SHA ${headSha.slice(0,7)}. A human must review and attest before merge.`);
-            } else {
-              console.log('');
-              console.log('='.repeat(50));
-              console.log('✓ Valid HAP attestation found');
-              console.log(`  Profile: ${attestationDetails.profile}`);
-              console.log(`  Environment: ${attestationDetails.env}`);
-              console.log(`  Execution Path: ${attestationDetails.path}`);
-              console.log(`  Frame Hash: ${attestationDetails.frame_hash}`);
-              console.log('='.repeat(50));
+            if (!attestationData) {
+              core.setFailed(`No HAP attestation found for SHA ${headSha.slice(0,7)}. A human must review and attest before merge.`);
+              return;
             }
+
+            // Verify attestation with the HAP service
+            console.log(`\nVerifying attestation with HAP service...`);
+            const verifyUrl = `${process.env.HAP_SERVICE_URL}/api/sp/verify`;
+
+            const response = await fetch(verifyUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                attestation: attestationData.blob,
+                expected_frame_hash: attestationData.frame_hash
+              })
+            });
+
+            const result = await response.json();
+
+            if (!result.valid) {
+              console.log(`\n✗ Attestation verification failed:`);
+              console.log(`  Error: ${result.error}`);
+              console.log(`  Reason: ${result.reason}`);
+              core.setFailed(`Attestation verification failed: ${result.error} - ${result.reason}`);
+              return;
+            }
+
+            // Check expiry
+            const now = Math.floor(Date.now() / 1000);
+            if (result.payload.expires_at < now) {
+              console.log(`\n✗ Attestation has expired`);
+              console.log(`  Expired at: ${new Date(result.payload.expires_at * 1000).toISOString()}`);
+              core.setFailed(`Attestation has expired. A new attestation is required.`);
+              return;
+            }
+
+            // Success!
+            console.log('');
+            console.log('='.repeat(50));
+            console.log('✓ HAP Attestation Verified');
+            console.log('='.repeat(50));
+            console.log(`  Attestation ID: ${result.payload.attestation_id}`);
+            console.log(`  Profile: ${result.payload.profile_id}`);
+            console.log(`  Frame Hash: ${result.payload.frame_hash}`);
+            console.log(`  Gates: ${result.payload.resolved_gates.join(', ')}`);
+            console.log(`  Decision Owners: ${result.payload.decision_owners.join(', ')}`);
+            console.log(`  Issued: ${new Date(result.payload.issued_at * 1000).toISOString()}`);
+            console.log(`  Expires: ${new Date(result.payload.expires_at * 1000).toISOString()}`);
+            console.log('='.repeat(50));
