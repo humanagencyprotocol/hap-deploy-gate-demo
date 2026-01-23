@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { parsePRInput, fetchPRDetails, fetchPRFiles, PRDetails, PRFile } from '../lib/github';
+import { runSDGs, hasHardStop, getHardStops, getWarnings, SDGResult, SDGContext } from '../sdg/runner';
 
 type Step = 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
 type Role = 'engineering' | 'release_management';
@@ -252,10 +253,24 @@ export default function Home() {
   const [problemUnderstood, setProblemUnderstood] = useState(false);
   const [objectiveClear, setObjectiveClear] = useState(false);
   const [tradeoffsAcceptable, setTradeoffsAcceptable] = useState(false);
+  const [objectiveText, setObjectiveText] = useState(''); // User's stated objective
+
+  // SDG Results
+  const [sdgResults, setSdgResults] = useState<SDGResult[]>([]);
+  const [sdgChecked, setSdgChecked] = useState(false);
 
   // Result
   const [attestationResult, setAttestationResult] = useState<AttestationResult | null>(null);
   const [commentUrl, setCommentUrl] = useState<string | null>(null);
+  const [executorOutput, setExecutorOutput] = useState<string | null>(null);
+
+  // Feedback (post-execution, non-protocol)
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [feedbackAnswers, setFeedbackAnswers] = useState({
+    objectiveAchieved: '',
+    tradeoffsAcceptable: '',
+    surprised: '',
+  });
 
   // Determine required roles based on execution path
   const requiredRoles: Role[] = executionPath === 'full'
@@ -447,9 +462,99 @@ blob=${attestationResult.attestation}
     }
   }, [prDetails, attestationResult, executionPath, targetEnv, selectedFiles, owner, repo, selectedRole]);
 
+  // Run SDGs before proceeding to confirm
+  const runSDGChecks = useCallback(async () => {
+    if (!prDetails) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Build SDG context from current UI state
+      const context: SDGContext = {
+        // Structural data
+        affected_domains: deriveDomainsFromFiles(prFiles.map(f => f.filename)),
+        declared_decision_owner_scopes: [selectedRole],
+        frame_hashes: [], // Single reviewer for now
+        tradeoff_mode: executionPath,
+        execution_path: executionPath === 'canary' ? 'deploy-prod-canary' : 'deploy-prod-full',
+        // Semantic data
+        objective_text: objectiveText,
+        diff_summary: prFiles.map(f => `${f.status}: ${f.filename}`).join('\n'),
+      };
+
+      // SDG set from profile - hardcoded for demo
+      const sdgSet = [
+        'deploy/missing_decision_owner@1.0',
+        'deploy/commitment_mismatch@1.0',
+        'deploy/tradeoff_execution_mismatch@1.0',
+        'deploy/objective_diff_mismatch@1.0',
+      ];
+
+      const results = await runSDGs(sdgSet, context);
+      setSdgResults(results);
+      setSdgChecked(true);
+
+      // If no hard stops, proceed to confirm
+      if (!hasHardStop(results)) {
+        setStep('confirm');
+      }
+    } catch (err) {
+      setError(`SDG check failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [prDetails, prFiles, selectedRole, executionPath, objectiveText]);
+
+  // Derive domains from file paths (simplified heuristic)
+  function deriveDomainsFromFiles(files: string[]): string[] {
+    const domains = new Set<string>();
+    for (const file of files) {
+      if (file.includes('auth') || file.includes('security')) domains.add('security');
+      if (file.includes('billing') || file.includes('payment')) domains.add('finance');
+      if (file.includes('deploy') || file.includes('infra')) domains.add('infrastructure');
+      // Default: engineering covers everything
+      domains.add('engineering');
+    }
+    return Array.from(domains);
+  }
+
+  // Test the executor proxy - demonstrates blind execution
+  const testExecutor = useCallback(async () => {
+    if (!attestationResult) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_SP_URL || 'http://localhost:3001'}/api/executor/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attestation: attestationResult.attestation,
+          frame_hash: attestationResult.frame_hash,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.authorized) {
+        setExecutorOutput(data.output);
+      } else {
+        setError(`Executor rejected: ${data.error} - ${data.reason}`);
+      }
+    } catch (err) {
+      setError(`Executor test failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [attestationResult]);
+
   const currentStepIndex = stepOrder.indexOf(step);
   const allGatesChecked = problemUnderstood && objectiveClear && tradeoffsAcceptable;
   const roleAlreadyAttested = attestedRoles.has(selectedRole);
+  const sdgHardStops = getHardStops(sdgResults);
+  const sdgWarnings = getWarnings(sdgResults);
 
   return (
     <main style={styles.main}>
@@ -746,6 +851,28 @@ blob=${attestationResult.attestation}
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
             As <strong>{ROLE_INFO[selectedRole].label}</strong>, confirm you understand the implications:
           </p>
+
+          {/* Objective Input */}
+          <div style={{ marginBottom: '1.5rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.5rem' }}>
+              <strong>Your Objective</strong>
+              <br />
+              <span style={{ fontSize: '0.85rem', color: '#666' }}>
+                What do you want to achieve with this deployment? (This stays local - never transmitted)
+              </span>
+            </label>
+            <textarea
+              value={objectiveText}
+              onChange={(e) => setObjectiveText(e.target.value)}
+              placeholder="e.g., Fix the authentication bug that causes login failures..."
+              style={{
+                ...styles.input,
+                minHeight: '80px',
+                resize: 'vertical',
+              }}
+            />
+          </div>
+
           <div style={{ marginBottom: '0.75rem' }}>
             <label style={{ display: 'flex', alignItems: 'flex-start' }}>
               <input
@@ -797,37 +924,110 @@ blob=${attestationResult.attestation}
               </span>
             </label>
           </div>
+
+          {/* SDG Results */}
+          {sdgChecked && sdgHardStops.length > 0 && (
+            <div style={styles.error}>
+              <strong>Cannot proceed - integrity issues detected:</strong>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.5rem' }}>
+                {sdgHardStops.map(sdg => (
+                  <li key={sdg.id}>{sdg.user_prompt}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {sdgChecked && sdgWarnings.length > 0 && (
+            <div style={styles.warning}>
+              <strong>Warnings (you may proceed):</strong>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.5rem' }}>
+                {sdgWarnings.map(sdg => (
+                  <li key={sdg.id}>{sdg.user_prompt}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {step === 'gates' && (
             <button
               style={allGatesChecked ? styles.button : styles.buttonDisabled}
-              onClick={() => setStep('confirm')}
-              disabled={!allGatesChecked}
+              onClick={runSDGChecks}
+              disabled={!allGatesChecked || loading}
             >
-              Continue
+              {loading ? 'Checking...' : sdgChecked && sdgHardStops.length === 0 ? 'Continue' : 'Run Integrity Checks'}
             </button>
           )}
         </section>
       )}
 
-      {/* Step 6: Confirm & Request Attestation */}
+      {/* Step 6: Pre-Signature Summary */}
       {prDetails && currentStepIndex >= 5 && !roleAlreadyAttested && (
         <section style={step === 'confirm' ? styles.cardActive : styles.card}>
-          <h2>6. Confirm & Request Attestation</h2>
-          <div style={{ backgroundColor: '#f5f5f5', padding: '1rem', borderRadius: '4px', marginBottom: '1rem' }}>
-            <p><strong>Your Role:</strong> {ROLE_INFO[selectedRole].label}</p>
-            <p><strong>Repository:</strong> {prDetails.repo}</p>
-            <p><strong>Commit:</strong> {prDetails.head.sha}</p>
-            <p><strong>Environment:</strong> {targetEnv}</p>
-            <p><strong>Execution Path:</strong> {executionPath}</p>
-            <p><strong>Disclosures:</strong> {selectedFiles.size} files</p>
+          <h2>6. Pre-Signature Summary</h2>
+          <p style={{ fontSize: '0.95rem', color: '#333', marginBottom: '1rem' }}>
+            Review what you are about to sign. This is the boundary between your thinking and the protocol.
+          </p>
+
+          {/* What will be signed - structural only */}
+          <div style={{
+            backgroundColor: '#1a1a2e',
+            color: '#e0e0e0',
+            padding: '1.5rem',
+            borderRadius: '8px',
+            marginBottom: '1.5rem',
+            fontFamily: 'monospace',
+            fontSize: '0.9rem',
+          }}>
+            <p style={{ color: '#4fc3f7', marginBottom: '1rem', fontWeight: 'bold' }}>
+              You are about to sign:
+            </p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Profile:</strong> deploy-gate@0.2</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Repo:</strong> {prDetails.repo}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Commit:</strong> {prDetails.head.sha.slice(0, 12)}...</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Environment:</strong> {targetEnv}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Execution path:</strong> {executionPath === 'canary' ? 'deploy-prod-canary' : 'deploy-prod-full'}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Required scopes:</strong> {selectedRole}</p>
+            <p style={{ margin: '0.5rem 0' }}>• <strong>Gates closed:</strong> problem, objective, tradeoff, commitment</p>
           </div>
+
+          {/* Boundary notice */}
+          <div style={{
+            backgroundColor: '#fff8e1',
+            border: '1px solid #ffcc02',
+            padding: '1rem',
+            borderRadius: '4px',
+            marginBottom: '1.5rem',
+          }}>
+            <p style={{ margin: 0, fontWeight: 'bold', color: '#f57c00' }}>
+              Your written inputs will not be transmitted or stored.
+            </p>
+            <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem', color: '#666' }}>
+              Your objective, reasoning, and any notes stay local. Only the structural frame above crosses the boundary.
+            </p>
+          </div>
+
+          {/* SDG warnings reminder if any */}
+          {sdgWarnings.length > 0 && (
+            <div style={styles.warning}>
+              <strong>Proceeding despite warnings:</strong>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.5rem' }}>
+                {sdgWarnings.map(sdg => (
+                  <li key={sdg.id}>{sdg.user_prompt}</li>
+                ))}
+              </ul>
+              <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+                This is your choice. You own this decision.
+              </p>
+            </div>
+          )}
+
           {step === 'confirm' && (
             <button
               style={loading ? styles.buttonDisabled : styles.button}
               onClick={requestAttestation}
               disabled={loading}
             >
-              {loading ? 'Requesting...' : 'Request Attestation'}
+              {loading ? 'Signing...' : 'Sign Attestation'}
             </button>
           )}
         </section>
@@ -875,6 +1075,112 @@ blob=${attestationResult.attestation}
               {loading ? 'Posting...' : 'Post to PR Comment'}
             </button>
           )}
+
+          {/* Executor Demo */}
+          <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #eee' }}>
+            <h3>Blind Executor Demo</h3>
+            <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+              Test what the executor sees. It receives only the frame — no objectives, no reasoning, no AI.
+            </p>
+
+            {!executorOutput ? (
+              <button
+                style={loading ? styles.buttonDisabled : styles.buttonSecondary}
+                onClick={testExecutor}
+                disabled={loading}
+              >
+                {loading ? 'Testing...' : 'Test Executor'}
+              </button>
+            ) : (
+              <pre style={{
+                ...styles.pre,
+                backgroundColor: '#0d1117',
+                color: '#58a6ff',
+                border: '1px solid #30363d',
+              }}>
+                {executorOutput}
+              </pre>
+            )}
+          </div>
+
+          {/* Feedback Blueprint (Post-Execution, Non-Protocol) */}
+          <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #eee' }}>
+            <h3>Feedback (Optional)</h3>
+            <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+              Support learning without affecting authorization. This feedback:
+            </p>
+            <ul style={{ fontSize: '0.85rem', color: '#888', marginBottom: '1rem', paddingLeft: '1.5rem' }}>
+              <li>Is optional and human-controlled</li>
+              <li>Never fed into SDGs automatically</li>
+              <li>Never affects future execution</li>
+              <li>Stored locally, not correlated with attestations</li>
+            </ul>
+
+            {!feedbackSubmitted ? (
+              <div style={{ backgroundColor: '#fafafa', padding: '1rem', borderRadius: '4px' }}>
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    Was your objective achieved?
+                  </label>
+                  <select
+                    value={feedbackAnswers.objectiveAchieved}
+                    onChange={(e) => setFeedbackAnswers(prev => ({ ...prev, objectiveAchieved: e.target.value }))}
+                    style={{ ...styles.input, maxWidth: '300px' }}
+                  >
+                    <option value="">Select...</option>
+                    <option value="yes">Yes</option>
+                    <option value="partially">Partially</option>
+                    <option value="no">No</option>
+                    <option value="unknown">Too early to tell</option>
+                  </select>
+                </div>
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    Were the tradeoffs acceptable?
+                  </label>
+                  <select
+                    value={feedbackAnswers.tradeoffsAcceptable}
+                    onChange={(e) => setFeedbackAnswers(prev => ({ ...prev, tradeoffsAcceptable: e.target.value }))}
+                    style={{ ...styles.input, maxWidth: '300px' }}
+                  >
+                    <option value="">Select...</option>
+                    <option value="yes">Yes, as expected</option>
+                    <option value="better">Better than expected</option>
+                    <option value="worse">Worse than expected</option>
+                    <option value="different">Different than expected</option>
+                  </select>
+                </div>
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    What surprised you?
+                  </label>
+                  <textarea
+                    value={feedbackAnswers.surprised}
+                    onChange={(e) => setFeedbackAnswers(prev => ({ ...prev, surprised: e.target.value }))}
+                    placeholder="Optional: note any surprises or learnings..."
+                    style={{ ...styles.input, minHeight: '60px', resize: 'vertical' }}
+                  />
+                </div>
+
+                <button
+                  style={styles.buttonSecondary}
+                  onClick={() => {
+                    // In a real implementation, this would save locally
+                    console.log('Feedback (stored locally only):', feedbackAnswers);
+                    setFeedbackSubmitted(true);
+                  }}
+                >
+                  Save Feedback Locally
+                </button>
+              </div>
+            ) : (
+              <div style={styles.success}>
+                Feedback saved locally. Thank you for reflecting on this deployment.
+              </div>
+            )}
+          </div>
 
           <details style={{ marginTop: '1.5rem' }}>
             <summary style={{ cursor: 'pointer', marginBottom: '0.5rem' }}>

@@ -65,6 +65,13 @@ export const PROFILE_CONFIG = {
     default: 3600, // 1 hour default TTL
     max: 86400, // 24 hour max
   },
+  // Signal Detection Guides - fetched and executed locally in UI
+  sdgSet: [
+    'deploy/missing_decision_owner@1.0',
+    'deploy/commitment_mismatch@1.0',
+    'deploy/tradeoff_execution_mismatch@1.0',
+    'deploy/objective_diff_mismatch@1.0', // Warning only - semantic SDGs cannot block
+  ],
 } as const;
 
 export type ExecutionPath = keyof typeof PROFILE_CONFIG.executionPaths;
