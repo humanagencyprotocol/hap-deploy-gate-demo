@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { parsePRInput, fetchPRDetails, fetchPRFiles, PRDetails, PRFile } from '../lib/github';
 
-type Step = 'select-pr' | 'review-changes' | 'set-path' | 'gates' | 'confirm' | 'done';
+type Step = 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
+type Role = 'engineering' | 'release_management';
 
 interface AttestationResult {
   attestation: string;
@@ -11,6 +12,25 @@ interface AttestationResult {
   disclosure_hash: string;
   expires_at: string;
 }
+
+interface ExistingAttestation {
+  role: string;
+  sha: string;
+  profile: string;
+  expires_at?: string;
+  comment_id: number;
+}
+
+const ROLE_INFO: Record<Role, { label: string; description: string }> = {
+  engineering: {
+    label: 'Engineering',
+    description: 'Technical review - verify code quality, tests, and implementation',
+  },
+  release_management: {
+    label: 'Release Management',
+    description: 'Release approval - verify deployment readiness and rollout plan',
+  },
+};
 
 const styles = {
   main: {
@@ -105,6 +125,13 @@ const styles = {
     borderRadius: '4px',
     marginBottom: '1rem',
   },
+  warning: {
+    color: '#e65100',
+    backgroundColor: '#fff3e0',
+    padding: '1rem',
+    borderRadius: '4px',
+    marginBottom: '1rem',
+  },
   pre: {
     backgroundColor: '#263238',
     color: '#aed581',
@@ -130,9 +157,24 @@ const styles = {
     fontSize: '0.9rem',
     fontWeight: 'bold' as const,
   },
+  roleCard: {
+    padding: '1rem',
+    borderRadius: '8px',
+    marginBottom: '0.75rem',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+  },
+  attestationStatus: {
+    display: 'flex',
+    alignItems: 'center',
+    padding: '0.5rem 0.75rem',
+    borderRadius: '4px',
+    marginBottom: '0.5rem',
+    fontSize: '0.9rem',
+  },
 };
 
-const stepOrder: Step[] = ['select-pr', 'review-changes', 'set-path', 'gates', 'confirm', 'done'];
+const stepOrder: Step[] = ['select-pr', 'review-changes', 'set-path', 'select-role', 'gates', 'confirm', 'done'];
 
 function getStatusBadge(status: string) {
   const colors: Record<string, { bg: string; text: string }> = {
@@ -149,6 +191,42 @@ function getStatusBadge(status: string) {
   );
 }
 
+// Parse attestations from PR comments
+function parseAttestationsFromComments(comments: Array<{ id: number; body: string }>, headSha: string): ExistingAttestation[] {
+  const attestations: ExistingAttestation[] = [];
+  const beginMarker = '---BEGIN HAP_ATTESTATION v=1---';
+  const endMarker = '---END HAP_ATTESTATION---';
+
+  for (const comment of comments) {
+    const body = comment.body || '';
+    const beginIdx = body.indexOf(beginMarker);
+    const endIdx = body.indexOf(endMarker);
+
+    if (beginIdx === -1 || endIdx === -1) continue;
+
+    const block = body.slice(beginIdx + beginMarker.length, endIdx).trim();
+    const lines = block.split('\n').map(l => l.trim());
+    const data: Record<string, string> = {};
+
+    for (const line of lines) {
+      const eq = line.indexOf('=');
+      if (eq > 0) data[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+
+    // Only include attestations for current SHA
+    if (data.sha === headSha && data.role) {
+      attestations.push({
+        role: data.role,
+        sha: data.sha,
+        profile: data.profile,
+        comment_id: comment.id,
+      });
+    }
+  }
+
+  return attestations;
+}
+
 export default function Home() {
   const [step, setStep] = useState<Step>('select-pr');
   const [prInput, setPrInput] = useState('');
@@ -161,10 +239,14 @@ export default function Home() {
   const [owner, setOwner] = useState('');
   const [repo, setRepo] = useState('');
 
+  // Existing attestations
+  const [existingAttestations, setExistingAttestations] = useState<ExistingAttestation[]>([]);
+
   // User selections
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [executionPath, setExecutionPath] = useState<'canary' | 'full'>('canary');
   const [targetEnv, setTargetEnv] = useState<'staging' | 'prod'>('prod');
+  const [selectedRole, setSelectedRole] = useState<Role>('engineering');
 
   // Gates
   const [problemUnderstood, setProblemUnderstood] = useState(false);
@@ -174,6 +256,16 @@ export default function Home() {
   // Result
   const [attestationResult, setAttestationResult] = useState<AttestationResult | null>(null);
   const [commentUrl, setCommentUrl] = useState<string | null>(null);
+
+  // Determine required roles based on execution path
+  const requiredRoles: Role[] = executionPath === 'full'
+    ? ['engineering', 'release_management']
+    : ['engineering'];
+
+  // Check which roles are already attested
+  const attestedRoles = new Set(existingAttestations.map(a => a.role));
+  const missingRoles = requiredRoles.filter(r => !attestedRoles.has(r));
+  const allRolesAttested = missingRoles.length === 0;
 
   const loadPR = useCallback(async () => {
     setError(null);
@@ -197,6 +289,15 @@ export default function Home() {
 
       // Pre-select all files
       setSelectedFiles(new Set(files.map(f => f.filename)));
+
+      // Fetch existing attestations
+      const commentsRes = await fetch(`/api/comments?owner=${parsed.owner}&repo=${parsed.repo}&pr=${parsed.number}`);
+      if (commentsRes.ok) {
+        const comments = await commentsRes.json();
+        const attestations = parseAttestationsFromComments(comments, details.head.sha);
+        setExistingAttestations(attestations);
+      }
+
       setStep('review-changes');
     } catch (err) {
       setError(`Failed to load PR: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -238,6 +339,7 @@ export default function Home() {
         body: JSON.stringify({
           profile_id: 'deploy-gate@0.2',
           execution_path: executionPath,
+          role: selectedRole,
           frame: {
             repo: prDetails.repo,
             sha: prDetails.head.sha,
@@ -245,7 +347,7 @@ export default function Home() {
             disclosures: Array.from(selectedFiles),
           },
           decision_owners: [
-            { id: 'human-reviewer', scope: '*' },
+            { id: `${selectedRole}-reviewer`, scope: selectedRole },
           ],
           gates: {
             problem_understood: problemUnderstood,
@@ -259,7 +361,7 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Attestation failed');
+        throw new Error(data.error || data.reason || 'Attestation failed');
       }
 
       setAttestationResult(data);
@@ -269,7 +371,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [prDetails, executionPath, targetEnv, selectedFiles, problemUnderstood, objectiveClear, tradeoffsAcceptable]);
+  }, [prDetails, executionPath, targetEnv, selectedFiles, problemUnderstood, objectiveClear, tradeoffsAcceptable, selectedRole]);
 
   const postComment = useCallback(async () => {
     if (!prDetails || !attestationResult) return;
@@ -277,8 +379,10 @@ export default function Home() {
     setError(null);
     setLoading(true);
 
-    const commentBody = `## HAP Deploy Gate Attestation
+    const roleLabel = ROLE_INFO[selectedRole].label;
+    const commentBody = `## HAP Deploy Gate Attestation - ${roleLabel}
 
+**Role:** \`${selectedRole}\`
 **Profile:** \`deploy-gate@0.2\`
 **Execution Path:** \`${executionPath}\`
 **Environment:** \`${targetEnv}\`
@@ -287,7 +391,7 @@ export default function Home() {
 ### Disclosures
 ${Array.from(selectedFiles).map(f => `- \`${f}\``).join('\n')}
 
-### Gates Confirmed
+### Gates Confirmed by ${roleLabel}
 - [x] Problem understood
 - [x] Objective clear
 - [x] Tradeoffs acceptable
@@ -296,7 +400,8 @@ ${Array.from(selectedFiles).map(f => `- \`${f}\``).join('\n')}
 
 \`\`\`
 ---BEGIN HAP_ATTESTATION v=1---
-profile=${attestationResult.frame_hash.includes('deploy-gate') ? 'deploy-gate@0.2' : 'deploy-gate@0.2'}
+profile=deploy-gate@0.2
+role=${selectedRole}
 env=${targetEnv}
 path=${executionPath}
 sha=${prDetails.head.sha}
@@ -327,15 +432,24 @@ blob=${attestationResult.attestation}
       }
 
       setCommentUrl(data.comment_url);
+
+      // Add to existing attestations
+      setExistingAttestations(prev => [...prev, {
+        role: selectedRole,
+        sha: prDetails.head.sha,
+        profile: 'deploy-gate@0.2',
+        comment_id: data.comment_id,
+      }]);
     } catch (err) {
       setError(`Failed to post comment: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
-  }, [prDetails, attestationResult, executionPath, targetEnv, selectedFiles, owner, repo]);
+  }, [prDetails, attestationResult, executionPath, targetEnv, selectedFiles, owner, repo, selectedRole]);
 
   const currentStepIndex = stepOrder.indexOf(step);
   const allGatesChecked = problemUnderstood && objectiveClear && tradeoffsAcceptable;
+  const roleAlreadyAttested = attestedRoles.has(selectedRole);
 
   return (
     <main style={styles.main}>
@@ -373,8 +487,30 @@ blob=${attestationResult.attestation}
             <p style={{ fontSize: '0.9rem', color: '#666' }}>
               {prDetails.repo} | {prDetails.head.sha.slice(0, 7)} | by {prDetails.user.login}
             </p>
+            {existingAttestations.length > 0 && (
+              <div style={{ marginTop: '1rem' }}>
+                <p style={{ fontSize: '0.9rem', fontWeight: 'bold', marginBottom: '0.5rem' }}>
+                  Existing Attestations for this SHA:
+                </p>
+                {existingAttestations.map((att, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      ...styles.attestationStatus,
+                      backgroundColor: '#e8f5e9',
+                      color: '#2e7d32',
+                    }}
+                  >
+                    ✓ {ROLE_INFO[att.role as Role]?.label || att.role}
+                  </div>
+                ))}
+              </div>
+            )}
             {step === 'select-pr' && (
-              <button style={styles.buttonSecondary} onClick={() => setPrDetails(null)}>
+              <button style={styles.buttonSecondary} onClick={() => {
+                setPrDetails(null);
+                setExistingAttestations([]);
+              }}>
                 Change PR
               </button>
             )}
@@ -452,7 +588,7 @@ blob=${attestationResult.attestation}
             <label style={{ display: 'block', marginBottom: '0.5rem' }}>
               <strong>Execution Path:</strong>
             </label>
-            <label style={{ marginRight: '1.5rem' }}>
+            <label style={{ marginRight: '1.5rem', display: 'block', marginBottom: '0.5rem' }}>
               <input
                 type="radio"
                 name="path"
@@ -460,9 +596,9 @@ blob=${attestationResult.attestation}
                 checked={executionPath === 'canary'}
                 onChange={() => setExecutionPath('canary')}
               />{' '}
-              Canary (gradual rollout)
+              <strong>Canary</strong> - gradual rollout (requires: Engineering)
             </label>
-            <label>
+            <label style={{ display: 'block' }}>
               <input
                 type="radio"
                 name="path"
@@ -470,7 +606,7 @@ blob=${attestationResult.attestation}
                 checked={executionPath === 'full'}
                 onChange={() => setExecutionPath('full')}
               />{' '}
-              Full (immediate deployment)
+              <strong>Full</strong> - immediate deployment (requires: Engineering + Release Management)
             </label>
           </div>
           <div style={{ marginBottom: '1rem' }}>
@@ -498,20 +634,117 @@ blob=${attestationResult.attestation}
               Production
             </label>
           </div>
+
+          {/* Show attestation status for selected path */}
+          <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+            <p style={{ fontWeight: 'bold', marginBottom: '0.5rem' }}>
+              Required Approvals for {executionPath === 'full' ? 'Full' : 'Canary'} Deployment:
+            </p>
+            {requiredRoles.map(role => {
+              const isAttested = attestedRoles.has(role);
+              return (
+                <div
+                  key={role}
+                  style={{
+                    ...styles.attestationStatus,
+                    backgroundColor: isAttested ? '#e8f5e9' : '#fff3e0',
+                    color: isAttested ? '#2e7d32' : '#e65100',
+                  }}
+                >
+                  {isAttested ? '✓' : '○'} {ROLE_INFO[role].label}
+                  {isAttested && ' - Attested'}
+                  {!isAttested && ' - Pending'}
+                </div>
+              );
+            })}
+            {allRolesAttested && (
+              <div style={styles.success}>
+                All required approvals collected! Ready to merge.
+              </div>
+            )}
+          </div>
+
           {step === 'set-path' && (
-            <button style={styles.button} onClick={() => setStep('gates')}>
+            <button style={styles.button} onClick={() => setStep('select-role')}>
               Continue
             </button>
           )}
         </section>
       )}
 
-      {/* Step 4: Gates */}
+      {/* Step 4: Select Your Role */}
       {prDetails && currentStepIndex >= 3 && (
-        <section style={step === 'gates' ? styles.cardActive : styles.card}>
-          <h2>4. Decision Gates</h2>
+        <section style={step === 'select-role' ? styles.cardActive : styles.card}>
+          <h2>4. Select Your Role</h2>
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
-            Confirm you understand the implications of this deployment:
+            Who are you? Select your role to provide your attestation.
+          </p>
+
+          {requiredRoles.map(role => {
+            const isAttested = attestedRoles.has(role);
+            const isSelected = selectedRole === role;
+            return (
+              <div
+                key={role}
+                onClick={() => !isAttested && setSelectedRole(role)}
+                style={{
+                  ...styles.roleCard,
+                  backgroundColor: isSelected ? '#e3f2fd' : isAttested ? '#f5f5f5' : '#fff',
+                  border: isSelected ? '2px solid #1976d2' : '1px solid #ddd',
+                  opacity: isAttested ? 0.7 : 1,
+                  cursor: isAttested ? 'not-allowed' : 'pointer',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <strong>{ROLE_INFO[role].label}</strong>
+                    <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
+                      {ROLE_INFO[role].description}
+                    </p>
+                  </div>
+                  {isAttested && (
+                    <span style={{
+                      backgroundColor: '#e8f5e9',
+                      color: '#2e7d32',
+                      padding: '0.25rem 0.5rem',
+                      borderRadius: '4px',
+                      fontSize: '0.8rem',
+                    }}>
+                      ✓ Already Attested
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {executionPath === 'canary' && !requiredRoles.includes('release_management') && (
+            <p style={{ fontSize: '0.85rem', color: '#666', marginTop: '1rem', fontStyle: 'italic' }}>
+              Note: Canary deployment only requires Engineering approval.
+            </p>
+          )}
+
+          {roleAlreadyAttested && (
+            <div style={styles.warning}>
+              You have already attested for the {ROLE_INFO[selectedRole].label} role on this SHA.
+              {missingRoles.length > 0 && ` Waiting for: ${missingRoles.map(r => ROLE_INFO[r].label).join(', ')}`}
+            </div>
+          )}
+
+          {step === 'select-role' && !roleAlreadyAttested && (
+            <button style={styles.button} onClick={() => setStep('gates')}>
+              Continue as {ROLE_INFO[selectedRole].label}
+            </button>
+          )}
+        </section>
+      )}
+
+      {/* Step 5: Gates */}
+      {prDetails && currentStepIndex >= 4 && !roleAlreadyAttested && (
+        <section style={step === 'gates' ? styles.cardActive : styles.card}>
+          <h2>5. Decision Gates ({ROLE_INFO[selectedRole].label})</h2>
+          <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+            As <strong>{ROLE_INFO[selectedRole].label}</strong>, confirm you understand the implications:
           </p>
           <div style={{ marginBottom: '0.75rem' }}>
             <label style={{ display: 'flex', alignItems: 'flex-start' }}>
@@ -576,11 +809,12 @@ blob=${attestationResult.attestation}
         </section>
       )}
 
-      {/* Step 5: Confirm & Request Attestation */}
-      {prDetails && currentStepIndex >= 4 && (
+      {/* Step 6: Confirm & Request Attestation */}
+      {prDetails && currentStepIndex >= 5 && !roleAlreadyAttested && (
         <section style={step === 'confirm' ? styles.cardActive : styles.card}>
-          <h2>5. Confirm & Request Attestation</h2>
+          <h2>6. Confirm & Request Attestation</h2>
           <div style={{ backgroundColor: '#f5f5f5', padding: '1rem', borderRadius: '4px', marginBottom: '1rem' }}>
+            <p><strong>Your Role:</strong> {ROLE_INFO[selectedRole].label}</p>
             <p><strong>Repository:</strong> {prDetails.repo}</p>
             <p><strong>Commit:</strong> {prDetails.head.sha}</p>
             <p><strong>Environment:</strong> {targetEnv}</p>
@@ -599,12 +833,12 @@ blob=${attestationResult.attestation}
         </section>
       )}
 
-      {/* Step 6: Done */}
+      {/* Step 7: Done */}
       {attestationResult && (
         <section style={styles.cardActive}>
-          <h2>Attestation Ready</h2>
+          <h2>Attestation Ready - {ROLE_INFO[selectedRole].label}</h2>
           <div style={styles.success}>
-            Attestation created successfully!
+            Attestation created successfully for {ROLE_INFO[selectedRole].label}!
           </div>
           <div style={{ marginBottom: '1rem' }}>
             <p><strong>Frame Hash:</strong></p>
@@ -619,12 +853,19 @@ blob=${attestationResult.attestation}
           </div>
 
           {commentUrl ? (
-            <div style={styles.success}>
-              Comment posted!{' '}
-              <a href={commentUrl} target="_blank" rel="noopener noreferrer">
-                View on GitHub
-              </a>
-            </div>
+            <>
+              <div style={styles.success}>
+                Comment posted!{' '}
+                <a href={commentUrl} target="_blank" rel="noopener noreferrer">
+                  View on GitHub
+                </a>
+              </div>
+              {missingRoles.length > 0 && (
+                <div style={styles.warning}>
+                  Still waiting for: {missingRoles.filter(r => r !== selectedRole).map(r => ROLE_INFO[r].label).join(', ')}
+                </div>
+              )}
+            </>
           ) : (
             <button
               style={loading ? styles.buttonDisabled : styles.button}
@@ -642,6 +883,7 @@ blob=${attestationResult.attestation}
             <pre style={styles.pre}>
 {`---BEGIN HAP_ATTESTATION v=1---
 profile=deploy-gate@0.2
+role=${selectedRole}
 env=${targetEnv}
 path=${executionPath}
 sha=${prDetails?.head.sha}
@@ -657,15 +899,15 @@ blob=${attestationResult.attestation}
       <footer style={{ marginTop: '3rem', color: '#999', fontSize: '0.9rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
         <p>
           Server:{' '}
-          <a href="http://localhost:3001" style={{ color: '#1976d2' }}>
-            http://localhost:3001
+          <a href="https://service.humanagencyprotocol.org" style={{ color: '#1976d2' }}>
+            service.humanagencyprotocol.org
           </a>
           {' | '}
-          <a href="http://localhost:3001/prod" style={{ color: '#1976d2' }}>
+          <a href="https://service.humanagencyprotocol.org/prod" style={{ color: '#1976d2' }}>
             /prod
           </a>
           {' | '}
-          <a href="http://localhost:3001/api/sp/pubkey" style={{ color: '#1976d2' }}>
+          <a href="https://service.humanagencyprotocol.org/api/sp/pubkey" style={{ color: '#1976d2' }}>
             /api/sp/pubkey
           </a>
         </p>

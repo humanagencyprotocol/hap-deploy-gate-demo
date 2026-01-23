@@ -13,6 +13,7 @@ const EXECUTION_PATH_MAP: Record<string, string> = {
 interface UIAttestRequest {
   profile_id: string;
   execution_path: string;
+  role: 'engineering' | 'release_management'; // The role/scope of this attestation
   frame: {
     repo: string;
     sha: string;
@@ -78,7 +79,10 @@ export async function POST(request: NextRequest) {
     // Add commitment and decision_owners as they're implicit in the UI flow
     resolvedGates.push('commitment', 'decision_owners');
 
-    // Build SP request
+    // Get the role from the request (default to engineering for backwards compatibility)
+    const role = body.role || 'engineering';
+
+    // Build SP request - each attestation covers a single role/domain
     const spRequest = {
       profile_id: body.profile_id,
       execution_path: spExecutionPath,
@@ -86,11 +90,7 @@ export async function POST(request: NextRequest) {
       resolved_gates: resolvedGates,
       decision_owners: body.decision_owners.map(d => d.id),
       decision_owner_scopes: [
-        { did: body.decision_owners[0]?.id || 'human-reviewer', domain: 'engineering', env: body.frame.env },
-        // Add release_management for full deployment
-        ...(body.execution_path === 'full'
-          ? [{ did: body.decision_owners[0]?.id || 'human-reviewer', domain: 'release_management', env: body.frame.env }]
-          : []),
+        { did: body.decision_owners[0]?.id || 'human-reviewer', domain: role, env: body.frame.env },
       ],
     };
 
@@ -111,11 +111,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(data, { status: response.status });
     }
 
-    // Return with frame_hash and disclosure_hash for the UI
+    // Return with frame_hash, disclosure_hash, and role for the UI
     return NextResponse.json({
       ...data,
       frame_hash: fHash,
       disclosure_hash: discHash,
+      role, // Include the role so the UI can display it in the attestation block
       expires_at: new Date(data.expires_at * 1000).toISOString(),
     });
   } catch (error) {
