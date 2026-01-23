@@ -1,8 +1,17 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { parsePRInput, fetchPRDetails, fetchPRFiles, PRDetails, PRFile } from '../lib/github';
 import { runSDGs, hasHardStop, getHardStops, getWarnings, SDGResult, SDGContext } from '../sdg/runner';
+import {
+  LocalAIConfig,
+  DEFAULT_AI_CONFIG,
+  PROVIDER_PRESETS,
+  checkAIAvailability,
+  getAIAssistance,
+  getFallbackAssistance,
+  AIAssistanceRequest,
+} from '../local-ai/client';
 
 type Step = 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
 type Role = 'engineering' | 'release_management';
@@ -271,6 +280,59 @@ export default function Home() {
     tradeoffsAcceptable: '',
     surprised: '',
   });
+
+  // Local AI (advisory only - cannot affect protocol)
+  const [aiConfig, setAiConfig] = useState<LocalAIConfig>({ ...DEFAULT_AI_CONFIG, enabled: true });
+  const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  const [aiDisclaimer, setAiDisclaimer] = useState<string | null>(null);
+  const [showAiSettings, setShowAiSettings] = useState(false);
+
+  // Check AI availability on mount
+  useEffect(() => {
+    checkAIAvailability(aiConfig).then(setAiAvailable);
+  }, [aiConfig]);
+
+  // Request AI assistance for objective drafting
+  const requestAIAssistance = useCallback(async (type: AIAssistanceRequest['type']) => {
+    if (!prDetails) return;
+
+    setAiLoading(true);
+    setAiSuggestion(null);
+    setAiDisclaimer(null);
+
+    const request: AIAssistanceRequest = {
+      type,
+      context: {
+        prTitle: prDetails.title,
+        prDescription: prDetails.body || undefined,
+        diffSummary: prFiles.map(f => `${f.status}: ${f.filename} (+${f.additions}/-${f.deletions})`).join('\n'),
+        changedFiles: prFiles.map(f => f.filename),
+        currentObjective: objectiveText,
+      },
+    };
+
+    let response;
+    if (aiAvailable) {
+      response = await getAIAssistance(aiConfig, request);
+    } else {
+      response = getFallbackAssistance(request);
+    }
+
+    setAiSuggestion(response.suggestion || response.error || null);
+    setAiDisclaimer(response.disclaimer);
+    setAiLoading(false);
+  }, [prDetails, prFiles, objectiveText, aiAvailable, aiConfig]);
+
+  // Apply AI suggestion to objective
+  const applySuggestion = useCallback(() => {
+    if (aiSuggestion) {
+      setObjectiveText(aiSuggestion);
+      setAiSuggestion(null);
+      setAiDisclaimer(null);
+    }
+  }, [aiSuggestion]);
 
   // Determine required roles based on execution path
   const requiredRoles: Role[] = executionPath === 'full'
@@ -852,7 +914,7 @@ blob=${attestationResult.attestation}
             As <strong>{ROLE_INFO[selectedRole].label}</strong>, confirm you understand the implications:
           </p>
 
-          {/* Objective Input */}
+          {/* Objective Input with AI Assistance */}
           <div style={{ marginBottom: '1.5rem' }}>
             <label style={{ display: 'block', marginBottom: '0.5rem' }}>
               <strong>Your Objective</strong>
@@ -871,6 +933,255 @@ blob=${attestationResult.attestation}
                 resize: 'vertical',
               }}
             />
+
+            {/* AI Assistance - Advisory Only */}
+            <div style={{
+              marginTop: '0.75rem',
+              padding: '0.75rem',
+              backgroundColor: '#f0f7ff',
+              borderRadius: '4px',
+              border: '1px solid #bbdefb',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#1565c0' }}>
+                    AI Assistant
+                  </span>
+                  <span style={{
+                    marginLeft: '0.5rem',
+                    fontSize: '0.7rem',
+                    padding: '0.15rem 0.4rem',
+                    backgroundColor: aiAvailable ? '#c8e6c9' : '#fff3e0',
+                    color: aiAvailable ? '#2e7d32' : '#e65100',
+                    borderRadius: '3px',
+                  }}>
+                    {aiAvailable ? `${aiConfig.provider === 'ollama' ? 'Ollama' : aiConfig.model} Connected` : 'Using Heuristics'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAiSettings(!showAiSettings)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#1565c0',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    textDecoration: 'underline',
+                  }}
+                >
+                  {showAiSettings ? 'Hide Settings' : 'Settings'}
+                </button>
+              </div>
+
+              {/* AI Settings Panel */}
+              {showAiSettings && (
+                <div style={{
+                  marginBottom: '0.75rem',
+                  padding: '0.75rem',
+                  backgroundColor: '#fff',
+                  borderRadius: '4px',
+                  border: '1px solid #e0e0e0',
+                }}>
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                      Provider Preset
+                    </label>
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const preset = PROVIDER_PRESETS[e.target.value];
+                        if (preset) {
+                          setAiConfig(prev => ({ ...prev, ...preset }));
+                        }
+                      }}
+                      style={{ ...styles.input, padding: '0.4rem', fontSize: '0.85rem' }}
+                    >
+                      <option value="">Select preset...</option>
+                      <option value="ollama">Ollama (local)</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="groq">Groq</option>
+                      <option value="together">Together AI</option>
+                    </select>
+                  </div>
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                      Endpoint URL
+                    </label>
+                    <input
+                      type="text"
+                      value={aiConfig.endpoint}
+                      onChange={(e) => setAiConfig(prev => ({ ...prev, endpoint: e.target.value }))}
+                      placeholder="https://api.openai.com/v1"
+                      style={{ ...styles.input, padding: '0.4rem', fontSize: '0.85rem' }}
+                    />
+                  </div>
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                      Model
+                    </label>
+                    <input
+                      type="text"
+                      value={aiConfig.model}
+                      onChange={(e) => setAiConfig(prev => ({ ...prev, model: e.target.value }))}
+                      placeholder="gpt-4o-mini"
+                      style={{ ...styles.input, padding: '0.4rem', fontSize: '0.85rem' }}
+                    />
+                  </div>
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                      API Key (optional for local)
+                    </label>
+                    <input
+                      type="password"
+                      value={aiConfig.apiKey || ''}
+                      onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value || undefined }))}
+                      placeholder="sk-..."
+                      style={{ ...styles.input, padding: '0.4rem', fontSize: '0.85rem' }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <label style={{ fontSize: '0.8rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={aiConfig.enabled}
+                        onChange={(e) => setAiConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+                        style={{ marginRight: '0.25rem' }}
+                      />
+                      Enabled
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => checkAIAvailability(aiConfig).then(setAiAvailable)}
+                      style={{
+                        ...styles.buttonSecondary,
+                        padding: '0.3rem 0.6rem',
+                        fontSize: '0.75rem',
+                      }}
+                    >
+                      Test Connection
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => requestAIAssistance('draft_objective')}
+                  disabled={aiLoading}
+                  style={{
+                    ...styles.buttonSecondary,
+                    padding: '0.4rem 0.8rem',
+                    fontSize: '0.85rem',
+                    opacity: aiLoading ? 0.6 : 1,
+                  }}
+                >
+                  {aiLoading ? '...' : 'Draft Objective'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => requestAIAssistance('summarize_risk')}
+                  disabled={aiLoading}
+                  style={{
+                    ...styles.buttonSecondary,
+                    padding: '0.4rem 0.8rem',
+                    fontSize: '0.85rem',
+                    opacity: aiLoading ? 0.6 : 1,
+                  }}
+                >
+                  Summarize Risk
+                </button>
+                <button
+                  type="button"
+                  onClick={() => requestAIAssistance('highlight_domains')}
+                  disabled={aiLoading}
+                  style={{
+                    ...styles.buttonSecondary,
+                    padding: '0.4rem 0.8rem',
+                    fontSize: '0.85rem',
+                    opacity: aiLoading ? 0.6 : 1,
+                  }}
+                >
+                  Highlight Domains
+                </button>
+                <button
+                  type="button"
+                  onClick={() => requestAIAssistance('explain_diff')}
+                  disabled={aiLoading}
+                  style={{
+                    ...styles.buttonSecondary,
+                    padding: '0.4rem 0.8rem',
+                    fontSize: '0.85rem',
+                    opacity: aiLoading ? 0.6 : 1,
+                  }}
+                >
+                  Explain Changes
+                </button>
+              </div>
+
+              {/* AI Suggestion Display */}
+              {aiSuggestion && (
+                <div style={{
+                  marginTop: '0.75rem',
+                  padding: '0.75rem',
+                  backgroundColor: '#fff',
+                  borderRadius: '4px',
+                  border: '1px dashed #90caf9',
+                }}>
+                  <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem', color: '#333' }}>
+                    {aiSuggestion}
+                  </p>
+                  {aiSuggestion && !aiSuggestion.startsWith('Affected domains:') && !aiSuggestion.includes('•') && (
+                    <button
+                      type="button"
+                      onClick={applySuggestion}
+                      style={{
+                        ...styles.button,
+                        padding: '0.3rem 0.6rem',
+                        fontSize: '0.8rem',
+                        backgroundColor: '#4caf50',
+                      }}
+                    >
+                      Use This
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setAiSuggestion(null); setAiDisclaimer(null); }}
+                    style={{
+                      ...styles.buttonSecondary,
+                      padding: '0.3rem 0.6rem',
+                      fontSize: '0.8rem',
+                      marginLeft: '0.5rem',
+                    }}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {/* Disclaimer - always visible when there's a suggestion */}
+              {aiDisclaimer && (
+                <p style={{
+                  margin: '0.5rem 0 0',
+                  fontSize: '0.75rem',
+                  color: '#666',
+                  fontStyle: 'italic',
+                }}>
+                  {aiDisclaimer}
+                </p>
+              )}
+
+              {/* Permissions notice */}
+              <p style={{
+                margin: '0.5rem 0 0',
+                fontSize: '0.7rem',
+                color: '#999',
+              }}>
+                AI can read context but cannot: modify frame fields, trigger attestation, or affect execution.
+              </p>
+            </div>
           </div>
 
           <div style={{ marginBottom: '0.75rem' }}>
