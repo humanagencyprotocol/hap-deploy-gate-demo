@@ -15,7 +15,7 @@ jobs:
     if: github.event.pull_request || (github.event.issue.pull_request && contains(github.event.comment.body, 'HAP_ATTESTATION'))
     runs-on: ubuntu-latest
     steps:
-      - name: Find and verify attestation
+      - name: Find and verify attestations
         uses: actions/github-script@v7
         with:
           script: |
@@ -34,11 +34,11 @@ jobs:
 
             const headSha = pr.head.sha;
             const repo = `${context.repo.owner}/${context.repo.repo}`;
-            console.log(`Checking attestation for PR #${pr.number}`);
+            console.log(`Checking attestations for PR #${pr.number}`);
             console.log(`  Repo: ${repo}`);
             console.log(`  SHA: ${headSha}`);
 
-            // Find attestation in PR comments
+            // Find all attestations in PR comments
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -47,7 +47,10 @@ jobs:
 
             const beginMarker = '---BEGIN HAP_ATTESTATION v=1---';
             const endMarker = '---END HAP_ATTESTATION---';
-            let attestationData = null;
+
+            // Collect all valid attestations for this SHA
+            const attestations = [];
+            let executionPath = null;
 
             for (const comment of comments.data) {
               const body = comment.body || '';
@@ -68,65 +71,108 @@ jobs:
               console.log(`\nFound attestation in comment ${comment.id}:`);
               console.log(`  SHA in attestation: ${data.sha}`);
               console.log(`  Profile: ${data.profile}`);
+              console.log(`  Role: ${data.role || 'engineering'}`);
+              console.log(`  Path: ${data.path}`);
 
-              // Check SHA match first
+              // Check SHA match
               if (data.sha !== headSha) {
                 console.log(`  ✗ SHA mismatch (PR head is ${headSha})`);
                 continue;
               }
 
               console.log(`  ✓ SHA matches`);
-              attestationData = data;
-              break;
+
+              // Store execution path (should be same for all attestations)
+              if (data.path) {
+                executionPath = data.path;
+              }
+
+              attestations.push({
+                ...data,
+                commentId: comment.id,
+                user: comment.user?.login,
+                role: data.role || 'engineering' // Default to engineering for backwards compatibility
+              });
             }
 
-            if (!attestationData) {
+            if (attestations.length === 0) {
               core.setFailed(`No HAP attestation found for SHA ${headSha.slice(0,7)}. A human must review and attest before merge.`);
               return;
             }
 
-            // Verify attestation with the HAP service
-            console.log(`\nVerifying attestation with HAP service...`);
+            // Determine required roles based on execution path
+            const requiredRoles = executionPath === 'full'
+              ? ['engineering', 'release_management']
+              : ['engineering'];
+
+            console.log(`\nExecution path: ${executionPath || 'canary'}`);
+            console.log(`Required roles: ${requiredRoles.join(', ')}`);
+
+            // Verify each attestation and track which roles are covered
+            const verifiedRoles = new Set();
             const verifyUrl = `${process.env.HAP_SERVICE_URL}/api/sp/verify`;
 
-            const response = await fetch(verifyUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                attestation: attestationData.blob,
-                expected_frame_hash: attestationData.frame_hash
-              })
-            });
+            for (const attestation of attestations) {
+              console.log(`\nVerifying ${attestation.role} attestation from ${attestation.user}...`);
 
-            const result = await response.json();
+              const response = await fetch(verifyUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  attestation: attestation.blob,
+                  expected_frame_hash: attestation.frame_hash
+                })
+              });
 
-            if (!result.valid) {
-              console.log(`\n✗ Attestation verification failed:`);
-              console.log(`  Error: ${result.error}`);
-              console.log(`  Reason: ${result.reason}`);
-              core.setFailed(`Attestation verification failed: ${result.error} - ${result.reason}`);
-              return;
+              const result = await response.json();
+
+              if (!result.valid) {
+                console.log(`  ✗ Verification failed: ${result.error} - ${result.reason}`);
+                continue;
+              }
+
+              // Check expiry
+              const now = Math.floor(Date.now() / 1000);
+              if (result.payload.expires_at < now) {
+                console.log(`  ✗ Attestation has expired`);
+                continue;
+              }
+
+              console.log(`  ✓ Valid attestation`);
+              console.log(`    Attestation ID: ${result.payload.attestation_id}`);
+              console.log(`    Issued: ${new Date(result.payload.issued_at * 1000).toISOString()}`);
+              console.log(`    Expires: ${new Date(result.payload.expires_at * 1000).toISOString()}`);
+
+              verifiedRoles.add(attestation.role);
             }
 
-            // Check expiry
-            const now = Math.floor(Date.now() / 1000);
-            if (result.payload.expires_at < now) {
-              console.log(`\n✗ Attestation has expired`);
-              console.log(`  Expired at: ${new Date(result.payload.expires_at * 1000).toISOString()}`);
-              core.setFailed(`Attestation has expired. A new attestation is required.`);
+            // Check if all required roles are covered
+            const missingRoles = requiredRoles.filter(r => !verifiedRoles.has(r));
+
+            if (missingRoles.length > 0) {
+              console.log('');
+              console.log('='.repeat(50));
+              console.log('✗ Missing Required Attestations');
+              console.log('='.repeat(50));
+              console.log(`  Verified roles: ${[...verifiedRoles].join(', ') || 'none'}`);
+              console.log(`  Missing roles: ${missingRoles.join(', ')}`);
+              console.log('='.repeat(50));
+
+              const roleLabels = {
+                'engineering': 'Engineering',
+                'release_management': 'Release Management'
+              };
+              const missingLabels = missingRoles.map(r => roleLabels[r] || r).join(', ');
+              core.setFailed(`Missing attestations from: ${missingLabels}. All required approvals must be obtained before merge.`);
               return;
             }
 
             // Success!
             console.log('');
             console.log('='.repeat(50));
-            console.log('✓ HAP Attestation Verified');
+            console.log('✓ All HAP Attestations Verified');
             console.log('='.repeat(50));
-            console.log(`  Attestation ID: ${result.payload.attestation_id}`);
-            console.log(`  Profile: ${result.payload.profile_id}`);
-            console.log(`  Frame Hash: ${result.payload.frame_hash}`);
-            console.log(`  Gates: ${result.payload.resolved_gates.join(', ')}`);
-            console.log(`  Decision Owners: ${result.payload.decision_owners.join(', ')}`);
-            console.log(`  Issued: ${new Date(result.payload.issued_at * 1000).toISOString()}`);
-            console.log(`  Expires: ${new Date(result.payload.expires_at * 1000).toISOString()}`);
+            console.log(`  Execution Path: ${executionPath || 'canary'}`);
+            console.log(`  Verified Roles: ${[...verifiedRoles].join(', ')}`);
+            console.log(`  Total Attestations: ${attestations.length}`);
             console.log('='.repeat(50));
