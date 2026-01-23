@@ -262,6 +262,7 @@ export default function Home() {
   // Result
   const [attestationResult, setAttestationResult] = useState<AttestationResult | null>(null);
   const [commentUrl, setCommentUrl] = useState<string | null>(null);
+  const [executorOutput, setExecutorOutput] = useState<string | null>(null);
 
   // Determine required roles based on execution path
   const requiredRoles: Role[] = executionPath === 'full'
@@ -509,6 +510,37 @@ blob=${attestationResult.attestation}
     }
     return Array.from(domains);
   }
+
+  // Test the executor proxy - demonstrates blind execution
+  const testExecutor = useCallback(async () => {
+    if (!attestationResult) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_SP_URL || 'http://localhost:3001'}/api/executor/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attestation: attestationResult.attestation,
+          frame_hash: attestationResult.frame_hash,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.authorized) {
+        setExecutorOutput(data.output);
+      } else {
+        setError(`Executor rejected: ${data.error} - ${data.reason}`);
+      }
+    } catch (err) {
+      setError(`Executor test failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [attestationResult]);
 
   const currentStepIndex = stepOrder.indexOf(step);
   const allGatesChecked = problemUnderstood && objectiveClear && tradeoffsAcceptable;
@@ -1035,6 +1067,33 @@ blob=${attestationResult.attestation}
               {loading ? 'Posting...' : 'Post to PR Comment'}
             </button>
           )}
+
+          {/* Executor Demo */}
+          <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #eee' }}>
+            <h3>Blind Executor Demo</h3>
+            <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+              Test what the executor sees. It receives only the frame — no objectives, no reasoning, no AI.
+            </p>
+
+            {!executorOutput ? (
+              <button
+                style={loading ? styles.buttonDisabled : styles.buttonSecondary}
+                onClick={testExecutor}
+                disabled={loading}
+              >
+                {loading ? 'Testing...' : 'Test Executor'}
+              </button>
+            ) : (
+              <pre style={{
+                ...styles.pre,
+                backgroundColor: '#0d1117',
+                color: '#58a6ff',
+                border: '1px solid #30363d',
+              }}>
+                {executorOutput}
+              </pre>
+            )}
+          </div>
 
           <details style={{ marginTop: '1.5rem' }}>
             <summary style={{ cursor: 'pointer', marginBottom: '0.5rem' }}>
