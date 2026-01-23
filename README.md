@@ -63,17 +63,24 @@ NEXT_PUBLIC_SP_URL=http://localhost:3001
 
 ## GitHub Setup
 
-### 1. Enable Branch Protection (Required for Merge Gate)
+### Enable Branch Protection (Required for Merge Gate)
 
-To block merges without valid attestations:
+To block merges without valid attestations, you need to set up a branch ruleset:
 
-1. Go to **Settings → Branches → Add branch ruleset** (or "Add rule" for classic)
-2. Branch name pattern: `main`
-3. Enable: **Require status checks to pass before merging**
-4. Search and select: **Verify HAP Attestation**
-5. Save changes
+1. Go to **Settings → Rules → Rulesets → New ruleset → New branch ruleset**
+2. Configure the ruleset:
+   - **Ruleset name:** `HAP Protection`
+   - **Enforcement status:** `Active`
+3. Under **Target branches**, click **Add target** → **Include by pattern**:
+   - Enter: `main`
+4. Under **Branch rules**, enable:
+   - **Require status checks to pass**
+     - Click **Add checks** and search for: `Verify HAP Attestation`
+   - **Require a pull request before merging** (recommended)
+   - **Block force pushes** (recommended)
+5. Click **Create**
 
-Without this, the workflow will report status but won't block merges.
+Without this setup, the workflow will report status but won't block merges.
 
 > **Note:** The GitHub Action automatically uses `https://service.humanagencyprotocol.org` for attestation verification. No additional configuration is needed.
 
