@@ -87,7 +87,16 @@ export const PROVIDER_PRESETS: Record<string, Partial<LocalAIConfig>> = {
 };
 
 export interface AIAssistanceRequest {
-  type: 'draft_objective' | 'summarize_risk' | 'highlight_domains' | 'explain_diff';
+  type:
+    // Questions (default mode) - AI explains and questions
+    | 'explain_changes'       // "What does this change do?"
+    | 'list_risks'            // "What could go wrong?"
+    | 'affected_areas'        // "What areas are affected?"
+    | 'check_objective'       // "Does my objective match the changes?"
+    | 'what_to_verify'        // "What should I verify before signing?"
+    // Wording help (explicit request, with friction) - returns options
+    | 'draft_options';        // Returns 2-3 options, requires user edit
+
   context: {
     prTitle?: string;
     prDescription?: string;
@@ -250,45 +259,8 @@ ${context.currentObjective ? `- Current Objective Draft: ${context.currentObject
 `.trim();
 
   switch (type) {
-    case 'draft_objective':
-      return `You are helping a human reviewer draft their objective for a code deployment.
-
-${contextBlock}
-
-Based on the PR context, suggest a clear, concise objective statement (1-2 sentences) that captures what this deployment aims to achieve.
-
-Important: This is YOUR objective as the reviewer - what do YOU want to accomplish by approving this? Focus on the outcome, not the code changes.
-
-Respond with just the objective statement, nothing else.`;
-
-    case 'summarize_risk':
-      return `You are helping a human reviewer understand the risks of a code deployment.
-
-${contextBlock}
-
-Summarize the potential risks of this deployment in 2-3 bullet points. Consider:
-- What could go wrong?
-- What areas of the system are affected?
-- Are there any red flags in the changes?
-
-Be concise and actionable.`;
-
-    case 'highlight_domains':
-      return `You are helping a human reviewer identify which organizational domains are affected by a code deployment.
-
-${contextBlock}
-
-Based on the changed files and diff, identify which domains are likely affected:
-- engineering (code quality, architecture)
-- security (auth, data protection)
-- infrastructure (deployment, scaling)
-- finance (billing, payments)
-- compliance (legal, regulatory)
-
-List only the affected domains with a brief reason for each.`;
-
-    case 'explain_diff':
-      return `You are helping a human reviewer understand a code diff.
+    case 'explain_changes':
+      return `You are helping a human reviewer understand a code change. You explain and question - you do not make decisions.
 
 ${contextBlock}
 
@@ -297,7 +269,74 @@ Explain in plain language what this code change does. Focus on:
 - Why might this change have been made?
 - What should the reviewer pay attention to?
 
-Keep it brief and accessible.`;
+Keep it brief and accessible. Ask clarifying questions if the intent is unclear.`;
+
+    case 'list_risks':
+      return `You are helping a human reviewer understand the risks of a code deployment. You explain and question - you do not make decisions.
+
+${contextBlock}
+
+What could go wrong with this deployment? List 2-4 potential risks as questions:
+- "Have you verified that...?"
+- "What happens if...?"
+- "Is there a rollback plan for...?"
+
+Focus on things the reviewer should check or consider. Be concise.`;
+
+    case 'affected_areas':
+      return `You are helping a human reviewer identify which areas are affected by a code deployment. You explain and question - you do not make decisions.
+
+${contextBlock}
+
+Based on the changed files and diff, which areas are affected?
+- engineering (code quality, architecture)
+- security (auth, data protection)
+- infrastructure (deployment, scaling)
+- finance (billing, payments)
+- compliance (legal, regulatory)
+
+List affected areas with a brief reason. Ask if there are stakeholders who should review.`;
+
+    case 'check_objective':
+      return `You are helping a human reviewer check if their stated objective matches the code changes. You explain and question - you do not make decisions.
+
+${contextBlock}
+
+Compare the reviewer's objective to the actual changes. Point out:
+- Does the objective match what the code actually does?
+- Are there changes not covered by the objective?
+- Are there objectives the changes don't address?
+
+Be direct but not judgmental. Ask clarifying questions.`;
+
+    case 'what_to_verify':
+      return `You are helping a human reviewer prepare for approval. You explain and question - you do not make decisions.
+
+${contextBlock}
+
+Before signing the attestation, what should the reviewer verify?
+- List 3-5 specific things to check
+- Frame as questions: "Have you verified...?" "Did you check...?"
+- Focus on things that could go wrong or be overlooked
+
+Be practical and actionable.`;
+
+    case 'draft_options':
+      return `You are helping a human reviewer express their objective. You provide options - the human must choose and edit.
+
+${contextBlock}
+
+Suggest 3 different ways the reviewer might phrase their objective. Each should be:
+- 1-2 sentences
+- Focused on the outcome, not the code
+- Written from the reviewer's perspective
+
+Format as:
+1. [First option]
+2. [Second option]
+3. [Third option]
+
+The reviewer will choose one and modify it. Do not recommend which to use.`;
 
     default:
       return 'Please provide assistance with the code review.';
@@ -312,43 +351,95 @@ export function getFallbackAssistance(request: AIAssistanceRequest): AIAssistanc
   const { type, context } = request;
   const disclaimer = 'This is a simple heuristic, not AI. Consider enabling local AI for better assistance.';
 
+  const files = context.changedFiles || [];
+  const filesLower = files.map(f => f.toLowerCase()).join(' ');
+
   switch (type) {
-    case 'draft_objective':
+    case 'explain_changes':
       if (context.prTitle) {
-        // Simple: use PR title as starting point
-        const objective = context.prTitle
-          .replace(/^(fix|feat|chore|docs|refactor|test)(\(.*?\))?:\s*/i, '')
-          .trim();
         return {
           success: true,
-          suggestion: `Deploy changes to ${objective.toLowerCase()}`,
+          suggestion: `This PR "${context.prTitle}" modifies ${files.length} file(s). Review the changes to understand what behavior is affected.`,
           disclaimer,
         };
       }
       return {
         success: true,
-        suggestion: 'Deploy the changes in this PR to improve the system.',
+        suggestion: `This PR modifies ${files.length} file(s). Review the diff to understand what's changing.`,
         disclaimer,
       };
 
-    case 'highlight_domains':
-      const domains: string[] = ['engineering'];
-      const files = context.changedFiles || [];
-      const filesLower = files.map(f => f.toLowerCase()).join(' ');
+    case 'list_risks':
+      const risks: string[] = [];
+      if (filesLower.includes('auth') || filesLower.includes('login')) {
+        risks.push('Have you verified authentication flows still work?');
+      }
+      if (filesLower.includes('database') || filesLower.includes('migration')) {
+        risks.push('Is there a rollback plan for database changes?');
+      }
+      if (filesLower.includes('api') || filesLower.includes('endpoint')) {
+        risks.push('Are API changes backward compatible?');
+      }
+      if (risks.length === 0) {
+        risks.push('Have you tested the changes locally?');
+        risks.push('Is there monitoring in place to detect issues?');
+      }
+      return {
+        success: true,
+        suggestion: risks.join('\n'),
+        disclaimer,
+      };
 
+    case 'affected_areas':
+      const domains: string[] = ['engineering'];
       if (filesLower.includes('auth') || filesLower.includes('security') || filesLower.includes('password')) {
         domains.push('security');
       }
       if (filesLower.includes('billing') || filesLower.includes('payment') || filesLower.includes('price')) {
         domains.push('finance');
       }
-      if (filesLower.includes('deploy') || filesLower.includes('infra') || filesLower.includes('docker') || filesLower.includes('k8s')) {
+      if (filesLower.includes('deploy') || filesLower.includes('infra') || filesLower.includes('docker')) {
         domains.push('infrastructure');
       }
-
       return {
         success: true,
-        suggestion: `Affected domains: ${domains.join(', ')}`,
+        suggestion: `Affected areas: ${domains.join(', ')}. Have the relevant stakeholders reviewed?`,
+        disclaimer,
+      };
+
+    case 'check_objective':
+      if (!context.currentObjective) {
+        return {
+          success: true,
+          suggestion: 'No objective provided yet. Write your objective first, then check it against the changes.',
+          disclaimer,
+        };
+      }
+      return {
+        success: true,
+        suggestion: `Your objective mentions "${context.currentObjective.slice(0, 50)}...". Review the diff to confirm the changes match your intent.`,
+        disclaimer,
+      };
+
+    case 'what_to_verify':
+      return {
+        success: true,
+        suggestion: `Before signing:\n- Have you reviewed all ${files.length} changed files?\n- Do you understand why each change was made?\n- Is there a way to verify the changes work as expected?`,
+        disclaimer,
+      };
+
+    case 'draft_options':
+      if (context.prTitle) {
+        const cleaned = context.prTitle.replace(/^(fix|feat|chore|docs|refactor|test)(\(.*?\))?:\s*/i, '').trim();
+        return {
+          success: true,
+          suggestion: `1. Deploy changes to ${cleaned.toLowerCase()}\n2. Approve ${cleaned.toLowerCase()} for production\n3. Ship improvements to ${cleaned.toLowerCase()}`,
+          disclaimer,
+        };
+      }
+      return {
+        success: true,
+        suggestion: '1. Deploy these changes to improve the system\n2. Approve this PR for production deployment\n3. Ship these improvements to users',
         disclaimer,
       };
 

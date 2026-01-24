@@ -13,8 +13,9 @@ import {
   AIAssistanceRequest,
 } from '../local-ai/client';
 
-type Step = 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
+type Step = 'ai-config' | 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
 type Role = 'engineering' | 'release_management';
+type AIMode = 'trusted' | 'custom' | 'none';
 
 interface AttestationResult {
   attestation: string;
@@ -184,7 +185,7 @@ const styles = {
   },
 };
 
-const stepOrder: Step[] = ['select-pr', 'review-changes', 'set-path', 'select-role', 'gates', 'confirm', 'done'];
+const stepOrder: Step[] = ['ai-config', 'select-pr', 'review-changes', 'set-path', 'select-role', 'gates', 'confirm', 'done'];
 
 function getStatusBadge(status: string) {
   const colors: Record<string, { bg: string; text: string }> = {
@@ -238,7 +239,7 @@ function parseAttestationsFromComments(comments: Array<{ id: number; body: strin
 }
 
 export default function Home() {
-  const [step, setStep] = useState<Step>('select-pr');
+  const [step, setStep] = useState<Step>('ai-config');
   const [prInput, setPrInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -282,25 +283,32 @@ export default function Home() {
   });
 
   // Local AI (advisory only - cannot affect protocol)
-  const [aiConfig, setAiConfig] = useState<LocalAIConfig>({ ...DEFAULT_AI_CONFIG, enabled: true });
+  const [aiMode, setAiMode] = useState<AIMode>('none');
+  const [aiConfig, setAiConfig] = useState<LocalAIConfig>({ ...DEFAULT_AI_CONFIG, enabled: false });
   const [aiAvailable, setAiAvailable] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
   const [aiDisclaimer, setAiDisclaimer] = useState<string | null>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
+  const [aiResponseType, setAiResponseType] = useState<'question' | 'draft_options'>('question');
+
+  // Track if objective was AI-assisted and requires editing
+  const [objectiveAiDraft, setObjectiveAiDraft] = useState<string | null>(null);
+  const objectiveWasEdited = objectiveAiDraft === null || objectiveText !== objectiveAiDraft;
 
   // Check AI availability on mount
   useEffect(() => {
     checkAIAvailability(aiConfig).then(setAiAvailable);
   }, [aiConfig]);
 
-  // Request AI assistance for objective drafting
+  // Request AI assistance
   const requestAIAssistance = useCallback(async (type: AIAssistanceRequest['type']) => {
     if (!prDetails) return;
 
     setAiLoading(true);
     setAiSuggestion(null);
     setAiDisclaimer(null);
+    setAiResponseType(type === 'draft_options' ? 'draft_options' : 'question');
 
     const request: AIAssistanceRequest = {
       type,
@@ -325,14 +333,13 @@ export default function Home() {
     setAiLoading(false);
   }, [prDetails, prFiles, objectiveText, aiAvailable, aiConfig]);
 
-  // Apply AI suggestion to objective
-  const applySuggestion = useCallback(() => {
-    if (aiSuggestion) {
-      setObjectiveText(aiSuggestion);
-      setAiSuggestion(null);
-      setAiDisclaimer(null);
-    }
-  }, [aiSuggestion]);
+  // Use AI draft option as starting point (requires edit before gate can close)
+  const useAsDraft = useCallback((draftText: string) => {
+    setObjectiveText(draftText);
+    setObjectiveAiDraft(draftText); // Track that this came from AI
+    setAiSuggestion(null);
+    setAiDisclaimer(null);
+  }, []);
 
   // Determine required roles based on execution path
   const requiredRoles: Role[] = executionPath === 'full'
@@ -613,7 +620,7 @@ blob=${attestationResult.attestation}
   }, [attestationResult]);
 
   const currentStepIndex = stepOrder.indexOf(step);
-  const allGatesChecked = problemUnderstood && objectiveClear && tradeoffsAcceptable;
+  const allGatesChecked = problemUnderstood && objectiveClear && tradeoffsAcceptable && objectiveWasEdited;
   const roleAlreadyAttested = attestedRoles.has(selectedRole);
   const sdgHardStops = getHardStops(sdgResults);
   const sdgWarnings = getWarnings(sdgResults);
@@ -643,9 +650,194 @@ blob=${attestationResult.attestation}
 
       {error && <div style={styles.error}>{error}</div>}
 
+      {/* Step 0: AI Configuration */}
+      <section style={step === 'ai-config' ? styles.cardActive : styles.card}>
+        <h2>1. AI Assistant (Optional)</h2>
+        <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1.5rem' }}>
+          AI can help you understand changes, but cannot make decisions for you.
+          It cannot modify fields, select paths, or trigger attestations.
+        </p>
+
+        <div style={{ marginBottom: '1rem' }}>
+          <label
+            style={{
+              ...styles.roleCard,
+              backgroundColor: aiMode === 'trusted' ? '#e3f2fd' : '#fff',
+              border: aiMode === 'trusted' ? '2px solid #1976d2' : '1px solid #ddd',
+              display: 'block',
+            }}
+            onClick={() => {
+              setAiMode('trusted');
+              setAiConfig({
+                ...PROVIDER_PRESETS.openai,
+                enabled: true,
+              } as LocalAIConfig);
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <input
+                type="radio"
+                name="aiMode"
+                checked={aiMode === 'trusted'}
+                onChange={() => {}}
+                style={{ marginRight: '0.75rem', marginTop: '0.25rem' }}
+              />
+              <div>
+                <strong>Use Trusted AI</strong>
+                <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
+                  OpenAI GPT-4o-mini — helps explain changes, surface risks, and answer questions.
+                  Requires API key.
+                </p>
+                {aiMode === 'trusted' && (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <input
+                      type="password"
+                      value={aiConfig.apiKey || ''}
+                      onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value || undefined }))}
+                      placeholder="OpenAI API Key (sk-...)"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', maxWidth: '400px' }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          </label>
+
+          <label
+            style={{
+              ...styles.roleCard,
+              backgroundColor: aiMode === 'custom' ? '#e3f2fd' : '#fff',
+              border: aiMode === 'custom' ? '2px solid #1976d2' : '1px solid #ddd',
+              display: 'block',
+            }}
+            onClick={() => {
+              setAiMode('custom');
+              setAiConfig({ ...DEFAULT_AI_CONFIG, enabled: true });
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <input
+                type="radio"
+                name="aiMode"
+                checked={aiMode === 'custom'}
+                onChange={() => {}}
+                style={{ marginRight: '0.75rem', marginTop: '0.25rem' }}
+              />
+              <div style={{ flex: 1 }}>
+                <strong>Use Custom AI</strong>
+                <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
+                  Configure your own endpoint (Ollama, Groq, Together AI, etc.)
+                </p>
+                {aiMode === 'custom' && (
+                  <div style={{ marginTop: '0.75rem' }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ marginBottom: '0.5rem' }}>
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const preset = PROVIDER_PRESETS[e.target.value];
+                          if (preset) {
+                            setAiConfig(prev => ({ ...prev, ...preset }));
+                          }
+                        }}
+                        style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', maxWidth: '200px' }}
+                      >
+                        <option value="">Preset...</option>
+                        <option value="ollama">Ollama (local)</option>
+                        <option value="groq">Groq</option>
+                        <option value="together">Together AI</option>
+                      </select>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <input
+                        type="text"
+                        value={aiConfig.endpoint}
+                        onChange={(e) => setAiConfig(prev => ({ ...prev, endpoint: e.target.value }))}
+                        placeholder="Endpoint URL"
+                        style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', flex: '1', minWidth: '200px' }}
+                      />
+                      <input
+                        type="text"
+                        value={aiConfig.model}
+                        onChange={(e) => setAiConfig(prev => ({ ...prev, model: e.target.value }))}
+                        placeholder="Model"
+                        style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', width: '150px' }}
+                      />
+                      <input
+                        type="password"
+                        value={aiConfig.apiKey || ''}
+                        onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value || undefined }))}
+                        placeholder="API Key (optional)"
+                        style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', width: '200px' }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </label>
+
+          <label
+            style={{
+              ...styles.roleCard,
+              backgroundColor: aiMode === 'none' ? '#e3f2fd' : '#fff',
+              border: aiMode === 'none' ? '2px solid #1976d2' : '1px solid #ddd',
+              display: 'block',
+            }}
+            onClick={() => {
+              setAiMode('none');
+              setAiConfig({ ...DEFAULT_AI_CONFIG, enabled: false });
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <input
+                type="radio"
+                name="aiMode"
+                checked={aiMode === 'none'}
+                onChange={() => {}}
+                style={{ marginRight: '0.75rem', marginTop: '0.25rem' }}
+              />
+              <div>
+                <strong>No AI Assistant</strong>
+                <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
+                  Review changes without AI assistance
+                </p>
+              </div>
+            </div>
+          </label>
+        </div>
+
+        {/* Advisory boundary notice */}
+        <div style={{
+          backgroundColor: '#fff8e1',
+          border: '1px solid #ffe082',
+          padding: '0.75rem',
+          borderRadius: '4px',
+          marginBottom: '1rem',
+          fontSize: '0.85rem',
+        }}>
+          <strong>Advisory Boundary:</strong> AI can explain and question. It cannot author decisions,
+          modify commitment fields, or trigger attestations.
+        </div>
+
+        {step === 'ai-config' && (
+          <button
+            style={styles.button}
+            onClick={() => {
+              if (aiConfig.enabled) {
+                checkAIAvailability(aiConfig).then(setAiAvailable);
+              }
+              setStep('select-pr');
+            }}
+          >
+            Continue
+          </button>
+        )}
+      </section>
+
       {/* Step 1: Select PR */}
       <section style={step === 'select-pr' ? styles.cardActive : styles.card}>
-        <h2>1. Select Pull Request</h2>
+        <h2>2. Select Pull Request</h2>
         {prDetails ? (
           <div>
             <p>
@@ -706,7 +898,7 @@ blob=${attestationResult.attestation}
       {/* Step 2: Review Changes */}
       {prDetails && (
         <section style={step === 'review-changes' ? styles.cardActive : styles.card}>
-          <h2>2. Review Changes & Select Disclosures</h2>
+          <h2>3. Review Changes & Select Disclosures</h2>
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
             Select files to include in the disclosure set ({selectedFiles.size} of {prFiles.length} selected)
           </p>
@@ -750,7 +942,7 @@ blob=${attestationResult.attestation}
       {/* Step 3: Execution Path */}
       {prDetails && currentStepIndex >= 2 && (
         <section style={step === 'set-path' ? styles.cardActive : styles.card}>
-          <h2>3. Execution Path & Environment</h2>
+          <h2>4. Execution Path & Environment</h2>
           <div style={{ marginBottom: '1rem' }}>
             <label style={{ display: 'block', marginBottom: '0.5rem' }}>
               <strong>Execution Path:</strong>
@@ -842,7 +1034,7 @@ blob=${attestationResult.attestation}
       {/* Step 4: Select Your Role */}
       {prDetails && currentStepIndex >= 3 && (
         <section style={step === 'select-role' ? styles.cardActive : styles.card}>
-          <h2>4. Select Your Role</h2>
+          <h2>5. Select Your Role</h2>
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
             Who are you? Select your role to provide your attestation.
           </p>
@@ -909,7 +1101,7 @@ blob=${attestationResult.attestation}
       {/* Step 5: Gates */}
       {prDetails && currentStepIndex >= 4 && !roleAlreadyAttested && (
         <section style={step === 'gates' ? styles.cardActive : styles.card}>
-          <h2>5. Decision Gates ({ROLE_INFO[selectedRole].label})</h2>
+          <h2>6. Decision Gates ({ROLE_INFO[selectedRole].label})</h2>
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
             As <strong>{ROLE_INFO[selectedRole].label}</strong>, confirm you understand the implications:
           </p>
@@ -931,8 +1123,35 @@ blob=${attestationResult.attestation}
                 ...styles.input,
                 minHeight: '80px',
                 resize: 'vertical',
+                borderColor: objectiveAiDraft && !objectiveWasEdited ? '#ff9800' : undefined,
               }}
             />
+            {/* AI-assisted draft warning */}
+            {objectiveAiDraft && !objectiveWasEdited && (
+              <div style={{
+                marginTop: '0.5rem',
+                padding: '0.5rem',
+                backgroundColor: '#fff3e0',
+                borderRadius: '4px',
+                border: '1px solid #ff9800',
+                fontSize: '0.85rem',
+                color: '#e65100',
+              }}>
+                <strong>AI-assisted draft</strong> — edit this text to make it yours before proceeding.
+              </div>
+            )}
+            {objectiveAiDraft && objectiveWasEdited && (
+              <div style={{
+                marginTop: '0.5rem',
+                padding: '0.5rem',
+                backgroundColor: '#e8f5e9',
+                borderRadius: '4px',
+                fontSize: '0.85rem',
+                color: '#2e7d32',
+              }}>
+                Objective edited. Ready to proceed.
+              </div>
+            )}
 
             {/* AI Assistance - Advisory Only */}
             <div style={{
@@ -1065,63 +1284,106 @@ blob=${attestationResult.attestation}
                 </div>
               )}
 
-              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {/* Question-first actions */}
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
                 <button
                   type="button"
-                  onClick={() => requestAIAssistance('draft_objective')}
-                  disabled={aiLoading}
+                  onClick={() => requestAIAssistance('explain_changes')}
+                  disabled={aiLoading || !aiConfig.enabled}
                   style={{
                     ...styles.buttonSecondary,
                     padding: '0.4rem 0.8rem',
                     fontSize: '0.85rem',
-                    opacity: aiLoading ? 0.6 : 1,
+                    opacity: (aiLoading || !aiConfig.enabled) ? 0.6 : 1,
                   }}
                 >
-                  {aiLoading ? '...' : 'Draft Objective'}
+                  {aiLoading ? '...' : 'What does this change?'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => requestAIAssistance('summarize_risk')}
-                  disabled={aiLoading}
+                  onClick={() => requestAIAssistance('list_risks')}
+                  disabled={aiLoading || !aiConfig.enabled}
                   style={{
                     ...styles.buttonSecondary,
                     padding: '0.4rem 0.8rem',
                     fontSize: '0.85rem',
-                    opacity: aiLoading ? 0.6 : 1,
+                    opacity: (aiLoading || !aiConfig.enabled) ? 0.6 : 1,
                   }}
                 >
-                  Summarize Risk
+                  What could go wrong?
                 </button>
                 <button
                   type="button"
-                  onClick={() => requestAIAssistance('highlight_domains')}
-                  disabled={aiLoading}
+                  onClick={() => requestAIAssistance('affected_areas')}
+                  disabled={aiLoading || !aiConfig.enabled}
                   style={{
                     ...styles.buttonSecondary,
                     padding: '0.4rem 0.8rem',
                     fontSize: '0.85rem',
-                    opacity: aiLoading ? 0.6 : 1,
+                    opacity: (aiLoading || !aiConfig.enabled) ? 0.6 : 1,
                   }}
                 >
-                  Highlight Domains
+                  What areas affected?
                 </button>
                 <button
                   type="button"
-                  onClick={() => requestAIAssistance('explain_diff')}
-                  disabled={aiLoading}
+                  onClick={() => requestAIAssistance('what_to_verify')}
+                  disabled={aiLoading || !aiConfig.enabled}
                   style={{
                     ...styles.buttonSecondary,
                     padding: '0.4rem 0.8rem',
                     fontSize: '0.85rem',
-                    opacity: aiLoading ? 0.6 : 1,
+                    opacity: (aiLoading || !aiConfig.enabled) ? 0.6 : 1,
                   }}
                 >
-                  Explain Changes
+                  What should I verify?
                 </button>
               </div>
 
-              {/* AI Suggestion Display */}
-              {aiSuggestion && (
+              {/* Check objective (only shown if objective has text) */}
+              {objectiveText && (
+                <button
+                  type="button"
+                  onClick={() => requestAIAssistance('check_objective')}
+                  disabled={aiLoading || !aiConfig.enabled}
+                  style={{
+                    ...styles.buttonSecondary,
+                    padding: '0.4rem 0.8rem',
+                    fontSize: '0.85rem',
+                    opacity: (aiLoading || !aiConfig.enabled) ? 0.6 : 1,
+                    marginBottom: '0.5rem',
+                  }}
+                >
+                  Check my objective against changes
+                </button>
+              )}
+
+              {/* Wording help - explicit request, with friction notice */}
+              <div style={{ marginTop: '0.5rem', borderTop: '1px solid #e0e0e0', paddingTop: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={() => requestAIAssistance('draft_options')}
+                  disabled={aiLoading || !aiConfig.enabled}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#666',
+                    fontSize: '0.8rem',
+                    cursor: (aiLoading || !aiConfig.enabled) ? 'not-allowed' : 'pointer',
+                    textDecoration: 'underline',
+                    padding: '0.25rem 0',
+                    opacity: (aiLoading || !aiConfig.enabled) ? 0.6 : 1,
+                  }}
+                >
+                  Help me word my objective...
+                </button>
+                <span style={{ fontSize: '0.7rem', color: '#999', marginLeft: '0.5rem' }}>
+                  (you must edit before using)
+                </span>
+              </div>
+
+              {/* AI Response Display */}
+              {aiSuggestion && aiResponseType === 'question' && (
                 <div style={{
                   marginTop: '0.75rem',
                   padding: '0.75rem',
@@ -1129,23 +1391,15 @@ blob=${attestationResult.attestation}
                   borderRadius: '4px',
                   border: '1px dashed #90caf9',
                 }}>
-                  <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem', color: '#333' }}>
+                  <pre style={{
+                    margin: '0 0 0.5rem',
+                    fontSize: '0.85rem',
+                    color: '#333',
+                    whiteSpace: 'pre-wrap',
+                    fontFamily: 'inherit',
+                  }}>
                     {aiSuggestion}
-                  </p>
-                  {aiSuggestion && !aiSuggestion.startsWith('Affected domains:') && !aiSuggestion.includes('•') && (
-                    <button
-                      type="button"
-                      onClick={applySuggestion}
-                      style={{
-                        ...styles.button,
-                        padding: '0.3rem 0.6rem',
-                        fontSize: '0.8rem',
-                        backgroundColor: '#4caf50',
-                      }}
-                    >
-                      Use This
-                    </button>
-                  )}
+                  </pre>
                   <button
                     type="button"
                     onClick={() => { setAiSuggestion(null); setAiDisclaimer(null); }}
@@ -1153,7 +1407,61 @@ blob=${attestationResult.attestation}
                       ...styles.buttonSecondary,
                       padding: '0.3rem 0.6rem',
                       fontSize: '0.8rem',
-                      marginLeft: '0.5rem',
+                    }}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {/* Draft Options Display - with friction */}
+              {aiSuggestion && aiResponseType === 'draft_options' && (
+                <div style={{
+                  marginTop: '0.75rem',
+                  padding: '0.75rem',
+                  backgroundColor: '#fff3e0',
+                  borderRadius: '4px',
+                  border: '1px solid #ffcc80',
+                }}>
+                  <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', fontWeight: 'bold', color: '#e65100' }}>
+                    Choose one and edit it to make it yours:
+                  </p>
+                  {aiSuggestion.split('\n').filter(line => line.match(/^\d\./)).map((option, i) => {
+                    const text = option.replace(/^\d\.\s*/, '').trim();
+                    return (
+                      <div key={i} style={{
+                        padding: '0.5rem',
+                        marginBottom: '0.5rem',
+                        backgroundColor: '#fff',
+                        borderRadius: '4px',
+                        border: '1px solid #e0e0e0',
+                      }}>
+                        <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem' }}>{text}</p>
+                        <button
+                          type="button"
+                          onClick={() => useAsDraft(text)}
+                          style={{
+                            ...styles.buttonSecondary,
+                            padding: '0.25rem 0.5rem',
+                            fontSize: '0.75rem',
+                          }}
+                        >
+                          Use as starting point
+                        </button>
+                      </div>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => { setAiSuggestion(null); setAiDisclaimer(null); }}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#666',
+                      fontSize: '0.8rem',
+                      cursor: 'pointer',
+                      textDecoration: 'underline',
+                      padding: '0.25rem 0',
                     }}
                   >
                     Dismiss
@@ -1274,7 +1582,7 @@ blob=${attestationResult.attestation}
       {/* Step 6: Pre-Signature Summary */}
       {prDetails && currentStepIndex >= 5 && !roleAlreadyAttested && (
         <section style={step === 'confirm' ? styles.cardActive : styles.card}>
-          <h2>6. Pre-Signature Summary</h2>
+          <h2>7. Pre-Signature Summary</h2>
           <p style={{ fontSize: '0.95rem', color: '#333', marginBottom: '1rem' }}>
             Review what you are about to sign. This is the boundary between your thinking and the protocol.
           </p>
