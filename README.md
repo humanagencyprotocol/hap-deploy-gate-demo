@@ -1,8 +1,10 @@
 # HAP Deploy Gate Demo
 
-As AI becomes capable of writing and shipping code autonomously, we need guardrails that keep humans in the loop — not as a formality, but as genuine decision-makers. This demo shows how: a checkpoint that forces reviewers to engage with changes before signing a cryptographic attestation. The attestation proves not just that someone clicked approve, but that they confirmed understanding of the problem, objective, and tradeoffs.   
+As AI becomes capable of writing and shipping code autonomously, we need guardrails that keep humans in the loop — not as a formality, but as genuine decision-makers. This demo shows how: a checkpoint that forces reviewers to engage with changes before signing a cryptographic attestation. The attestation proves not just that someone clicked approve, but that they confirmed understanding of the problem, objective, and tradeoffs.
 
-The full protocol goes further: domain-specific gates tailored to context, verified identity, integration with deployment systems and AI-assisted review that helps humans understand complex changes — not bypass them.   
+The full protocol goes further: domain-specific gates tailored to context, verified identity, integration with deployment systems and AI-assisted review that helps humans understand complex changes — not bypass them. The goal is twofold: prevent gradual loss of direction as systems scale, and provide clear, attributable authorization in high-risk or regulated environments where decisions must be explicit and defensible.
+
+**GitHub:** [github.com/humanagencyprotocol/hap-deploy-gate-demo](https://github.com/humanagencyprotocol/hap-deploy-gate-demo)
 
 ## How It Works
 
