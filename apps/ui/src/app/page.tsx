@@ -291,6 +291,8 @@ export default function Home() {
   const [aiDisclaimer, setAiDisclaimer] = useState<string | null>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [aiResponseType, setAiResponseType] = useState<'question' | 'draft_options'>('question');
+  const [aiConfigTesting, setAiConfigTesting] = useState(false);
+  const [aiConfigError, setAiConfigError] = useState<string | null>(null);
 
   // Track if objective was AI-assisted and requires editing
   const [objectiveAiDraft, setObjectiveAiDraft] = useState<string | null>(null);
@@ -300,6 +302,58 @@ export default function Home() {
   useEffect(() => {
     checkAIAvailability(aiConfig).then(setAiAvailable);
   }, [aiConfig]);
+
+  // Validate AI config and test connection before proceeding
+  const validateAndTestAI = useCallback(async (): Promise<boolean> => {
+    // If no AI selected, just proceed
+    if (aiMode === 'none') {
+      setAiConfigError(null);
+      return true;
+    }
+
+    // Validate required fields
+    if (!aiConfig.endpoint) {
+      setAiConfigError('Please enter an endpoint URL');
+      return false;
+    }
+
+    if (!aiConfig.model) {
+      setAiConfigError('Please enter a model name');
+      return false;
+    }
+
+    // For public AI, require API key
+    if (aiMode === 'public' && !aiConfig.apiKey) {
+      setAiConfigError('API key is required for public AI providers');
+      return false;
+    }
+
+    // Test connection
+    setAiConfigTesting(true);
+    setAiConfigError(null);
+
+    try {
+      const available = await checkAIAvailability(aiConfig);
+      setAiAvailable(available);
+
+      if (!available) {
+        if (aiMode === 'local') {
+          setAiConfigError('Cannot connect to local AI. Make sure Ollama is running.');
+        } else {
+          setAiConfigError('Cannot connect to AI provider. Check your endpoint and API key.');
+        }
+        setAiConfigTesting(false);
+        return false;
+      }
+
+      setAiConfigTesting(false);
+      return true;
+    } catch {
+      setAiConfigError('Connection test failed. Please check your settings.');
+      setAiConfigTesting(false);
+      return false;
+    }
+  }, [aiMode, aiConfig]);
 
   // Request AI assistance
   const requestAIAssistance = useCallback(async (type: AIAssistanceRequest['type']) => {
@@ -859,17 +913,25 @@ blob=${attestationResult.attestation}
           modify commitment fields, or trigger attestations.
         </div>
 
+        {/* AI Config Error */}
+        {aiConfigError && (
+          <div style={styles.error}>
+            {aiConfigError}
+          </div>
+        )}
+
         {step === 'ai-config' && (
           <button
-            style={styles.button}
-            onClick={() => {
-              if (aiConfig.enabled) {
-                checkAIAvailability(aiConfig).then(setAiAvailable);
+            style={aiConfigTesting ? styles.buttonDisabled : styles.button}
+            disabled={aiConfigTesting}
+            onClick={async () => {
+              const valid = await validateAndTestAI();
+              if (valid) {
+                setStep('select-pr');
               }
-              setStep('select-pr');
             }}
           >
-            Continue
+            {aiConfigTesting ? 'Testing connection...' : 'Continue'}
           </button>
         )}
       </section>
