@@ -15,7 +15,7 @@ import {
 
 type Step = 'ai-config' | 'select-pr' | 'review-changes' | 'set-path' | 'select-role' | 'gates' | 'confirm' | 'done';
 type Role = 'engineering' | 'release_management';
-type AIMode = 'trusted' | 'custom' | 'none';
+type AIMode = 'local' | 'public' | 'none';
 
 interface AttestationResult {
   attestation: string;
@@ -291,6 +291,8 @@ export default function Home() {
   const [aiDisclaimer, setAiDisclaimer] = useState<string | null>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [aiResponseType, setAiResponseType] = useState<'question' | 'draft_options'>('question');
+  const [aiConfigTesting, setAiConfigTesting] = useState(false);
+  const [aiConfigError, setAiConfigError] = useState<string | null>(null);
 
   // Track if objective was AI-assisted and requires editing
   const [objectiveAiDraft, setObjectiveAiDraft] = useState<string | null>(null);
@@ -300,6 +302,58 @@ export default function Home() {
   useEffect(() => {
     checkAIAvailability(aiConfig).then(setAiAvailable);
   }, [aiConfig]);
+
+  // Validate AI config and test connection before proceeding
+  const validateAndTestAI = useCallback(async (): Promise<boolean> => {
+    // If no AI selected, just proceed
+    if (aiMode === 'none') {
+      setAiConfigError(null);
+      return true;
+    }
+
+    // Validate required fields
+    if (!aiConfig.endpoint) {
+      setAiConfigError('Please enter an endpoint URL');
+      return false;
+    }
+
+    if (!aiConfig.model) {
+      setAiConfigError('Please enter a model name');
+      return false;
+    }
+
+    // For public AI, require API key
+    if (aiMode === 'public' && !aiConfig.apiKey) {
+      setAiConfigError('API key is required for public AI providers');
+      return false;
+    }
+
+    // Test connection
+    setAiConfigTesting(true);
+    setAiConfigError(null);
+
+    try {
+      const available = await checkAIAvailability(aiConfig);
+      setAiAvailable(available);
+
+      if (!available) {
+        if (aiMode === 'local') {
+          setAiConfigError('Cannot connect to local AI. Make sure Ollama is running.');
+        } else {
+          setAiConfigError('Cannot connect to AI provider. Check your endpoint and API key.');
+        }
+        setAiConfigTesting(false);
+        return false;
+      }
+
+      setAiConfigTesting(false);
+      return true;
+    } catch {
+      setAiConfigError('Connection test failed. Please check your settings.');
+      setAiConfigTesting(false);
+      return false;
+    }
+  }, [aiMode, aiConfig]);
 
   // Request AI assistance
   const requestAIAssistance = useCallback(async (type: AIAssistanceRequest['type']) => {
@@ -659,15 +713,82 @@ blob=${attestationResult.attestation}
         </p>
 
         <div style={{ marginBottom: '1rem' }}>
+          {/* Option 1: Local/Private AI (Trusted) */}
           <label
             style={{
               ...styles.roleCard,
-              backgroundColor: aiMode === 'trusted' ? '#e3f2fd' : '#fff',
-              border: aiMode === 'trusted' ? '2px solid #1976d2' : '1px solid #ddd',
+              backgroundColor: aiMode === 'local' ? '#e8f5e9' : '#fff',
+              border: aiMode === 'local' ? '2px solid #4caf50' : '1px solid #ddd',
               display: 'block',
             }}
             onClick={() => {
-              setAiMode('trusted');
+              setAiMode('local');
+              setAiConfig({
+                ...PROVIDER_PRESETS.ollama,
+                enabled: true,
+              } as LocalAIConfig);
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <input
+                type="radio"
+                name="aiMode"
+                checked={aiMode === 'local'}
+                onChange={() => {}}
+                style={{ marginRight: '0.75rem', marginTop: '0.25rem' }}
+              />
+              <div style={{ flex: 1 }}>
+                <strong>Use Local/Private AI</strong>
+                <span style={{
+                  marginLeft: '0.5rem',
+                  fontSize: '0.7rem',
+                  padding: '0.15rem 0.4rem',
+                  backgroundColor: '#c8e6c9',
+                  color: '#2e7d32',
+                  borderRadius: '3px',
+                }}>
+                  Recommended
+                </span>
+                <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
+                  Run AI locally with Ollama. Your data never leaves your machine.
+                </p>
+                {aiMode === 'local' && (
+                  <div style={{ marginTop: '0.75rem' }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <input
+                        type="text"
+                        value={aiConfig.endpoint}
+                        onChange={(e) => setAiConfig(prev => ({ ...prev, endpoint: e.target.value }))}
+                        placeholder="http://localhost:11434"
+                        style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', flex: '1', minWidth: '200px' }}
+                      />
+                      <input
+                        type="text"
+                        value={aiConfig.model}
+                        onChange={(e) => setAiConfig(prev => ({ ...prev, model: e.target.value }))}
+                        placeholder="llama3.2"
+                        style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', width: '150px' }}
+                      />
+                    </div>
+                    <p style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.5rem' }}>
+                      Install Ollama from <a href="https://ollama.ai" target="_blank" rel="noopener noreferrer" style={{ color: '#1976d2' }}>ollama.ai</a>, then run: <code>ollama pull llama3.2</code>
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </label>
+
+          {/* Option 2: Public AI (with warning) */}
+          <label
+            style={{
+              ...styles.roleCard,
+              backgroundColor: aiMode === 'public' ? '#fff3e0' : '#fff',
+              border: aiMode === 'public' ? '2px solid #ff9800' : '1px solid #ddd',
+              display: 'block',
+            }}
+            onClick={() => {
+              setAiMode('public');
               setAiConfig({
                 ...PROVIDER_PRESETS.openai,
                 enabled: true,
@@ -678,59 +799,30 @@ blob=${attestationResult.attestation}
               <input
                 type="radio"
                 name="aiMode"
-                checked={aiMode === 'trusted'}
-                onChange={() => {}}
-                style={{ marginRight: '0.75rem', marginTop: '0.25rem' }}
-              />
-              <div>
-                <strong>Use Trusted AI</strong>
-                <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
-                  OpenAI GPT-4o-mini — helps explain changes, surface risks, and answer questions.
-                  Requires API key.
-                </p>
-                {aiMode === 'trusted' && (
-                  <div style={{ marginTop: '0.75rem' }}>
-                    <input
-                      type="password"
-                      value={aiConfig.apiKey || ''}
-                      onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value || undefined }))}
-                      placeholder="OpenAI API Key (sk-...)"
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', maxWidth: '400px' }}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          </label>
-
-          <label
-            style={{
-              ...styles.roleCard,
-              backgroundColor: aiMode === 'custom' ? '#e3f2fd' : '#fff',
-              border: aiMode === 'custom' ? '2px solid #1976d2' : '1px solid #ddd',
-              display: 'block',
-            }}
-            onClick={() => {
-              setAiMode('custom');
-              setAiConfig({ ...DEFAULT_AI_CONFIG, enabled: true });
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-              <input
-                type="radio"
-                name="aiMode"
-                checked={aiMode === 'custom'}
+                checked={aiMode === 'public'}
                 onChange={() => {}}
                 style={{ marginRight: '0.75rem', marginTop: '0.25rem' }}
               />
               <div style={{ flex: 1 }}>
-                <strong>Use Custom AI</strong>
+                <strong>Use Public AI</strong>
                 <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0 0' }}>
-                  Configure your own endpoint (Ollama, Groq, Together AI, etc.)
+                  OpenAI, Groq, or other cloud providers. Requires API key.
                 </p>
-                {aiMode === 'custom' && (
+                {aiMode === 'public' && (
                   <div style={{ marginTop: '0.75rem' }} onClick={(e) => e.stopPropagation()}>
+                    {/* Warning */}
+                    <div style={{
+                      backgroundColor: '#ffebee',
+                      border: '1px solid #ef9a9a',
+                      padding: '0.5rem',
+                      borderRadius: '4px',
+                      marginBottom: '0.75rem',
+                      fontSize: '0.8rem',
+                      color: '#c62828',
+                    }}>
+                      <strong>Demo only.</strong> Do not use with sensitive or confidential data.
+                      PR content will be sent to external servers.
+                    </div>
                     <div style={{ marginBottom: '0.5rem' }}>
                       <select
                         value=""
@@ -742,9 +834,9 @@ blob=${attestationResult.attestation}
                         }}
                         style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', maxWidth: '200px' }}
                       >
-                        <option value="">Preset...</option>
-                        <option value="ollama">Ollama (local)</option>
-                        <option value="groq">Groq</option>
+                        <option value="">Select provider...</option>
+                        <option value="openai">OpenAI (GPT-4o-mini)</option>
+                        <option value="groq">Groq (Llama 3.1)</option>
                         <option value="together">Together AI</option>
                       </select>
                     </div>
@@ -767,7 +859,7 @@ blob=${attestationResult.attestation}
                         type="password"
                         value={aiConfig.apiKey || ''}
                         onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value || undefined }))}
-                        placeholder="API Key (optional)"
+                        placeholder="API Key"
                         style={{ ...styles.input, padding: '0.5rem', fontSize: '0.9rem', width: '200px' }}
                       />
                     </div>
@@ -777,6 +869,7 @@ blob=${attestationResult.attestation}
             </div>
           </label>
 
+          {/* Option 3: No AI */}
           <label
             style={{
               ...styles.roleCard,
@@ -820,17 +913,25 @@ blob=${attestationResult.attestation}
           modify commitment fields, or trigger attestations.
         </div>
 
+        {/* AI Config Error */}
+        {aiConfigError && (
+          <div style={styles.error}>
+            {aiConfigError}
+          </div>
+        )}
+
         {step === 'ai-config' && (
           <button
-            style={styles.button}
-            onClick={() => {
-              if (aiConfig.enabled) {
-                checkAIAvailability(aiConfig).then(setAiAvailable);
+            style={aiConfigTesting ? styles.buttonDisabled : styles.button}
+            disabled={aiConfigTesting}
+            onClick={async () => {
+              const valid = await validateAndTestAI();
+              if (valid) {
+                setStep('select-pr');
               }
-              setStep('select-pr');
             }}
           >
-            Continue
+            {aiConfigTesting ? 'Testing connection...' : 'Continue'}
           </button>
         )}
       </section>
