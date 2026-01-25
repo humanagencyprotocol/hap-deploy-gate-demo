@@ -1,9 +1,8 @@
 /**
  * Local AI Client - Advisory Only
  *
- * This client connects to a local AI (e.g., Ollama) to provide
- * ADVISORY assistance to reviewers. It helps with thinking,
- * not deciding.
+ * AI may surface reality, but it may not supply intent.
+ * Humans must author every commitment.
  *
  * PERMISSIONS MODEL:
  * ✅ readSemanticInputs: true  - Can read objectives, diffs, descriptions
@@ -11,26 +10,25 @@
  * ❌ triggerAttestation: false  - Cannot initiate signing
  * ❌ influenceExecution: false  - Cannot affect what gets executed
  *
- * ALLOWED USES:
- * - Help draft objectives
- * - Summarize risk
- * - Highlight missing domains
- * - Assist SDG detection heuristics
+ * RESPONSE FORMAT (non-negotiable):
+ * AI must respond only using structured blocks:
+ * - Observations: Neutral facts from the diff
+ * - Questions: Prompts for the human to think
+ * - Considerations: Non-prescriptive risk surfacing
+ * - Warnings: Only when mismatch is detected
  *
  * FORBIDDEN:
- * - Emit Frame keys
- * - Change execution paths
- * - Block execution directly
- * - Learn from outcomes automatically
- *
- * Local AI output is UX-only.
+ * - "You should write..."
+ * - "The objective should be..."
+ * - "I recommend choosing..."
+ * - Any sentence starting with "You should"
  */
 
 export interface LocalAIConfig {
-  endpoint: string; // e.g., http://localhost:11434 for Ollama, https://api.openai.com/v1 for OpenAI
-  model: string; // e.g., 'llama2', 'gpt-4', 'claude-3-haiku'
-  apiKey?: string; // Optional API key for authenticated providers
-  provider: 'ollama' | 'openai-compatible'; // API format to use
+  endpoint: string;
+  model: string;
+  apiKey?: string;
+  provider: 'ollama' | 'openai-compatible';
   enabled: boolean;
 }
 
@@ -41,7 +39,6 @@ export interface LocalAIPermissions {
   influenceExecution: false;
 }
 
-// Permissions are fixed - cannot be changed
 export const LOCAL_AI_PERMISSIONS: LocalAIPermissions = {
   readSemanticInputs: true,
   writeFrame: false,
@@ -49,15 +46,13 @@ export const LOCAL_AI_PERMISSIONS: LocalAIPermissions = {
   influenceExecution: false,
 };
 
-// Default config - uses Ollama on localhost
 export const DEFAULT_AI_CONFIG: LocalAIConfig = {
   endpoint: 'http://localhost:11434',
   model: 'llama3.2',
   provider: 'ollama',
-  enabled: false, // Disabled by default
+  enabled: false,
 };
 
-// Example configs for common providers
 export const PROVIDER_PRESETS: Record<string, Partial<LocalAIConfig>> = {
   ollama: {
     endpoint: 'http://localhost:11434',
@@ -67,11 +62,6 @@ export const PROVIDER_PRESETS: Record<string, Partial<LocalAIConfig>> = {
   openai: {
     endpoint: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
-    provider: 'openai-compatible',
-  },
-  anthropic: {
-    endpoint: 'https://api.anthropic.com/v1',
-    model: 'claude-3-haiku-20240307',
     provider: 'openai-compatible',
   },
   groq: {
@@ -88,21 +78,23 @@ export const PROVIDER_PRESETS: Record<string, Partial<LocalAIConfig>> = {
 
 export interface AIAssistanceRequest {
   type:
-    // Questions (default mode) - AI explains and questions
-    | 'explain_changes'       // "What does this change do?"
-    | 'list_risks'            // "What could go wrong?"
-    | 'affected_areas'        // "What areas are affected?"
-    | 'check_objective'       // "Does my objective match the changes?"
-    | 'what_to_verify'        // "What should I verify before signing?"
-    // Wording help (explicit request, with friction) - returns options
-    | 'draft_options';        // Returns 2-3 options, requires user edit
+    // Gate-specific checks (structured response format)
+    | 'check_problem'      // Help understand what changed and where
+    | 'check_objective'    // Detect drift between intent and changes
+    | 'check_tradeoffs'    // Surface risks and consequences
+    // Execution path explanation only
+    | 'explain_path';      // Explain implications of execution path (no recommendations)
 
   context: {
     prTitle?: string;
     prDescription?: string;
     diffSummary?: string;
     changedFiles?: string[];
-    currentObjective?: string;
+    // Gate-specific text
+    problemText?: string;
+    objectiveText?: string;
+    tradeoffsText?: string;
+    executionPath?: 'canary' | 'full';
   };
 }
 
@@ -110,7 +102,7 @@ export interface AIAssistanceResponse {
   success: boolean;
   suggestion?: string;
   error?: string;
-  disclaimer: string; // Always included to remind user this is advisory
+  disclaimer: string;
 }
 
 /**
@@ -121,14 +113,12 @@ export async function checkAIAvailability(config: LocalAIConfig): Promise<boolea
 
   try {
     if (config.provider === 'ollama') {
-      // Ollama health check
       const response = await fetch(`${config.endpoint}/api/tags`, {
         method: 'GET',
         signal: AbortSignal.timeout(2000),
       });
       return response.ok;
     } else {
-      // OpenAI-compatible: check models endpoint
       const headers: Record<string, string> = {};
       if (config.apiKey) {
         headers['Authorization'] = `Bearer ${config.apiKey}`;
@@ -152,7 +142,7 @@ export async function getAIAssistance(
   config: LocalAIConfig,
   request: AIAssistanceRequest
 ): Promise<AIAssistanceResponse> {
-  const disclaimer = 'This is AI-assisted thinking, not a decision. You own the final choice.';
+  const disclaimer = 'AI surfaces reality. You supply intent.';
 
   if (!config.enabled) {
     return {
@@ -162,23 +152,22 @@ export async function getAIAssistance(
     };
   }
 
-  const prompt = buildPrompt(request);
+  const { systemPrompt, userPrompt } = buildPrompt(request);
 
   try {
     let suggestion: string;
 
     if (config.provider === 'ollama') {
-      // Ollama API format
       const response = await fetch(`${config.endpoint}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: config.model,
-          prompt,
+          prompt: `${systemPrompt}\n\n${userPrompt}`,
           stream: false,
           options: {
             temperature: 0.7,
-            num_predict: 500,
+            num_predict: 600,
           },
         }),
         signal: AbortSignal.timeout(30000),
@@ -189,9 +178,8 @@ export async function getAIAssistance(
       }
 
       const data = await response.json();
-      suggestion = data.response?.trim() || 'No suggestion generated.';
+      suggestion = data.response?.trim() || 'No response generated.';
     } else {
-      // OpenAI-compatible API format
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };
@@ -205,17 +193,11 @@ export async function getAIAssistance(
         body: JSON.stringify({
           model: config.model,
           messages: [
-            {
-              role: 'system',
-              content: 'You are an assistant helping a human reviewer think through a code deployment. Be concise and helpful.',
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
           ],
           temperature: 0.7,
-          max_tokens: 500,
+          max_tokens: 600,
         }),
         signal: AbortSignal.timeout(30000),
       });
@@ -226,7 +208,7 @@ export async function getAIAssistance(
       }
 
       const data = await response.json();
-      suggestion = data.choices?.[0]?.message?.content?.trim() || 'No suggestion generated.';
+      suggestion = data.choices?.[0]?.message?.content?.trim() || 'No response generated.';
     }
 
     return {
@@ -244,209 +226,256 @@ export async function getAIAssistance(
 }
 
 /**
- * Build prompt based on request type
+ * Build gate-specific prompts
+ * Each gate has a different purpose and constraint set
  */
-function buildPrompt(request: AIAssistanceRequest): string {
+function buildPrompt(request: AIAssistanceRequest): { systemPrompt: string; userPrompt: string } {
   const { type, context } = request;
 
   const contextBlock = `
-Context:
-- PR Title: ${context.prTitle || 'Not provided'}
-- PR Description: ${context.prDescription || 'Not provided'}
-- Changed Files: ${context.changedFiles?.join(', ') || 'Not provided'}
-- Diff Summary: ${context.diffSummary || 'Not provided'}
-${context.currentObjective ? `- Current Objective Draft: ${context.currentObjective}` : ''}
+PR Title: ${context.prTitle || 'Not provided'}
+PR Description: ${context.prDescription || 'Not provided'}
+Changed Files: ${context.changedFiles?.join(', ') || 'Not provided'}
+Diff Summary:
+${context.diffSummary || 'Not provided'}
+`.trim();
+
+  // Response format instruction (used in all prompts)
+  const responseFormat = `
+RESPONSE FORMAT (required):
+You must respond using ONLY these structured blocks:
+
+**Observation**
+[Neutral fact derived from the diff]
+
+**Question**
+[Prompt for the human to think]
+
+**Consideration**
+[Non-prescriptive risk or consequence]
+
+**Warning**
+[Only when clear mismatch is detected]
+
+FORBIDDEN:
+- Never say "You should write..."
+- Never say "I recommend..."
+- Never suggest wording for any field
+- Never tell the user what to decide
 `.trim();
 
   switch (type) {
-    case 'explain_changes':
-      return `You are helping a human reviewer understand a code change. You explain and question - you do not make decisions.
+    case 'check_problem':
+      return {
+        systemPrompt: `You are assisting a human reviewer.
+Your role is to help them understand the code change.
 
-${contextBlock}
+Given the diff:
+- Identify affected components or domains
+- Describe where the problem likely surfaces
+- Ask clarifying questions
 
-Explain in plain language what this code change does. Focus on:
-- What behavior is being changed?
-- Why might this change have been made?
-- What should the reviewer pay attention to?
+Do NOT:
+- Propose wording for the problem statement
+- Judge correctness
+- Suggest approval or rejection
+- Infer intent
 
-Keep it brief and accessible. Ask clarifying questions if the intent is unclear.`;
+${responseFormat}`,
+        userPrompt: `${contextBlock}
 
-    case 'list_risks':
-      return `You are helping a human reviewer understand the risks of a code deployment. You explain and question - you do not make decisions.
+${context.problemText ? `The reviewer has written this problem statement:\n"${context.problemText}"` : 'The reviewer has not yet written a problem statement.'}
 
-${contextBlock}
-
-What could go wrong with this deployment? List 2-4 potential risks as questions:
-- "Have you verified that...?"
-- "What happens if...?"
-- "Is there a rollback plan for...?"
-
-Focus on things the reviewer should check or consider. Be concise.`;
-
-    case 'affected_areas':
-      return `You are helping a human reviewer identify which areas are affected by a code deployment. You explain and question - you do not make decisions.
-
-${contextBlock}
-
-Based on the changed files and diff, which areas are affected?
-- engineering (code quality, architecture)
-- security (auth, data protection)
-- infrastructure (deployment, scaling)
-- finance (billing, payments)
-- compliance (legal, regulatory)
-
-List affected areas with a brief reason. Ask if there are stakeholders who should review.`;
+Help them understand what is actually changing and where the problem manifests.`,
+      };
 
     case 'check_objective':
-      return `You are helping a human reviewer check if their stated objective matches the code changes. You explain and question - you do not make decisions.
+      return {
+        systemPrompt: `You are checking alignment between a human-stated objective and a code diff.
 
-${contextBlock}
+Compare the objective to the diff.
+- Identify areas of alignment
+- Identify areas that may be unrelated or missing
+- Ask questions if intent is unclear
 
-Compare the reviewer's objective to the actual changes. Point out:
-- Does the objective match what the code actually does?
-- Are there changes not covered by the objective?
-- Are there objectives the changes don't address?
+Do NOT:
+- Suggest a better objective
+- Rewrite the objective
+- Block progress
 
-Be direct but not judgmental. Ask clarifying questions.`;
+If misalignment is detected, raise a Warning.
 
-    case 'what_to_verify':
-      return `You are helping a human reviewer prepare for approval. You explain and question - you do not make decisions.
+${responseFormat}`,
+        userPrompt: `${contextBlock}
 
-${contextBlock}
+The reviewer's stated objective:
+"${context.objectiveText || 'Not provided'}"
 
-Before signing the attestation, what should the reviewer verify?
-- List 3-5 specific things to check
-- Frame as questions: "Have you verified...?" "Did you check...?"
-- Focus on things that could go wrong or be overlooked
+Check if the objective aligns with the actual code changes.`,
+      };
 
-Be practical and actionable.`;
+    case 'check_tradeoffs':
+      return {
+        systemPrompt: `You are helping a human reflect on tradeoffs.
 
-    case 'draft_options':
-      return `You are helping a human reviewer express their objective. You provide options - the human must choose and edit.
+Given:
+- The code diff
+- The selected execution path
+- The stated tradeoffs text
 
-${contextBlock}
+Surface:
+- Risks implied by the execution path
+- Potential downsides not explicitly acknowledged
 
-Suggest 3 different ways the reviewer might phrase their objective. Each should be:
-- 1-2 sentences
-- Focused on the outcome, not the code
-- Written from the reviewer's perspective
+Do NOT:
+- Recommend an execution path
+- Suggest wording
+- Evaluate acceptability
 
-Format as:
-1. [First option]
-2. [Second option]
-3. [Third option]
+Respond using Considerations or Warnings only.
 
-The reviewer will choose one and modify it. Do not recommend which to use.`;
+${responseFormat}`,
+        userPrompt: `${contextBlock}
+
+Execution Path: ${context.executionPath || 'Not selected'}
+${context.executionPath === 'full' ? '(Full = immediate rollout, higher risk)' : '(Canary = gradual rollout, reduced blast radius)'}
+
+The reviewer's stated tradeoffs:
+"${context.tradeoffsText || 'Not provided'}"
+
+Help surface risks and consequences they should consider.`,
+      };
+
+    case 'explain_path':
+      return {
+        systemPrompt: `You are explaining execution path implications.
+
+You may:
+- Explain what each path means
+- Describe risk profiles
+
+You must NOT:
+- Recommend which path to choose
+- Influence the decision
+
+${responseFormat}`,
+        userPrompt: `${contextBlock}
+
+The reviewer is considering: ${context.executionPath || 'not yet selected'}
+
+Explain the implications of the execution paths available (Canary vs Full).
+Do not make a recommendation.`,
+      };
 
     default:
-      return 'Please provide assistance with the code review.';
+      return {
+        systemPrompt: 'You are a code review assistant. Be helpful and concise.',
+        userPrompt: contextBlock,
+      };
   }
 }
 
 /**
- * Simple in-browser fallback when no local AI is available
- * Uses basic heuristics, not real AI
+ * Fallback when no AI is available - uses simple heuristics
  */
 export function getFallbackAssistance(request: AIAssistanceRequest): AIAssistanceResponse {
   const { type, context } = request;
-  const disclaimer = 'This is a simple heuristic, not AI. Consider enabling local AI for better assistance.';
+  const disclaimer = 'Heuristic-based (no AI). Enable AI for better assistance.';
 
   const files = context.changedFiles || [];
   const filesLower = files.map(f => f.toLowerCase()).join(' ');
 
   switch (type) {
-    case 'explain_changes':
-      if (context.prTitle) {
-        return {
-          success: true,
-          suggestion: `This PR "${context.prTitle}" modifies ${files.length} file(s). Review the changes to understand what behavior is affected.`,
-          disclaimer,
-        };
-      }
-      return {
-        success: true,
-        suggestion: `This PR modifies ${files.length} file(s). Review the diff to understand what's changing.`,
-        disclaimer,
-      };
+    case 'check_problem': {
+      const observations: string[] = [];
 
-    case 'list_risks':
-      const risks: string[] = [];
-      if (filesLower.includes('auth') || filesLower.includes('login')) {
-        risks.push('Have you verified authentication flows still work?');
+      if (files.length > 0) {
+        observations.push(`**Observation**\nThis change modifies ${files.length} file(s): ${files.slice(0, 3).join(', ')}${files.length > 3 ? '...' : ''}`);
       }
-      if (filesLower.includes('database') || filesLower.includes('migration')) {
-        risks.push('Is there a rollback plan for database changes?');
+
+      if (filesLower.includes('auth') || filesLower.includes('login')) {
+        observations.push('**Observation**\nAuthentication-related files are affected.');
       }
       if (filesLower.includes('api') || filesLower.includes('endpoint')) {
-        risks.push('Are API changes backward compatible?');
+        observations.push('**Observation**\nAPI endpoints are modified.');
       }
-      if (risks.length === 0) {
-        risks.push('Have you tested the changes locally?');
-        risks.push('Is there monitoring in place to detect issues?');
-      }
+
+      observations.push('**Question**\nWhere does this problem surface for users?');
+
       return {
         success: true,
-        suggestion: risks.join('\n'),
+        suggestion: observations.join('\n\n'),
         disclaimer,
       };
+    }
 
-    case 'affected_areas':
-      const domains: string[] = ['engineering'];
-      if (filesLower.includes('auth') || filesLower.includes('security') || filesLower.includes('password')) {
-        domains.push('security');
-      }
-      if (filesLower.includes('billing') || filesLower.includes('payment') || filesLower.includes('price')) {
-        domains.push('finance');
-      }
-      if (filesLower.includes('deploy') || filesLower.includes('infra') || filesLower.includes('docker')) {
-        domains.push('infrastructure');
-      }
-      return {
-        success: true,
-        suggestion: `Affected areas: ${domains.join(', ')}. Have the relevant stakeholders reviewed?`,
-        disclaimer,
-      };
-
-    case 'check_objective':
-      if (!context.currentObjective) {
+    case 'check_objective': {
+      if (!context.objectiveText) {
         return {
           success: true,
-          suggestion: 'No objective provided yet. Write your objective first, then check it against the changes.',
+          suggestion: '**Question**\nWhat outcome are you trying to achieve with this change?',
           disclaimer,
         };
       }
-      return {
-        success: true,
-        suggestion: `Your objective mentions "${context.currentObjective.slice(0, 50)}...". Review the diff to confirm the changes match your intent.`,
-        disclaimer,
-      };
 
-    case 'what_to_verify':
-      return {
-        success: true,
-        suggestion: `Before signing:\n- Have you reviewed all ${files.length} changed files?\n- Do you understand why each change was made?\n- Is there a way to verify the changes work as expected?`,
-        disclaimer,
-      };
+      const response: string[] = [];
+      response.push(`**Observation**\nYour objective mentions: "${context.objectiveText.slice(0, 60)}${context.objectiveText.length > 60 ? '...' : ''}"`);
+      response.push(`**Question**\nDoes every changed file contribute to this objective?`);
 
-    case 'draft_options':
-      if (context.prTitle) {
-        const cleaned = context.prTitle.replace(/^(fix|feat|chore|docs|refactor|test)(\(.*?\))?:\s*/i, '').trim();
-        return {
-          success: true,
-          suggestion: `1. Deploy changes to ${cleaned.toLowerCase()}\n2. Approve ${cleaned.toLowerCase()} for production\n3. Ship improvements to ${cleaned.toLowerCase()}`,
-          disclaimer,
-        };
+      if (files.length > 5) {
+        response.push('**Consideration**\nThis change touches many files. Ensure the scope matches your stated intent.');
       }
+
       return {
         success: true,
-        suggestion: '1. Deploy these changes to improve the system\n2. Approve this PR for production deployment\n3. Ship these improvements to users',
+        suggestion: response.join('\n\n'),
+        disclaimer,
+      };
+    }
+
+    case 'check_tradeoffs': {
+      const response: string[] = [];
+
+      if (context.executionPath === 'full') {
+        response.push('**Consideration**\nA full rollout increases blast radius if something goes wrong.');
+        response.push('**Question**\nIs there a rollback plan if issues are detected?');
+      } else {
+        response.push('**Consideration**\nCanary deployment reduces risk but delays full availability.');
+      }
+
+      if (filesLower.includes('database') || filesLower.includes('migration')) {
+        response.push('**Warning**\nDatabase changes detected. These may be difficult to roll back.');
+      }
+
+      if (!context.tradeoffsText) {
+        response.push('**Question**\nWhat downsides are you accepting by making this change?');
+      }
+
+      return {
+        success: true,
+        suggestion: response.join('\n\n'),
+        disclaimer,
+      };
+    }
+
+    case 'explain_path':
+      return {
+        success: true,
+        suggestion: `**Observation**
+Canary: Gradual rollout to a subset of users first. Lower risk, slower full deployment.
+
+**Observation**
+Full: Immediate deployment to all users. Faster availability, higher blast radius if issues occur.
+
+**Question**
+What is the acceptable risk level for this change?`,
         disclaimer,
       };
 
     default:
       return {
         success: false,
-        error: 'Fallback not available for this request type',
+        error: 'Unknown request type',
         disclaimer,
       };
   }
