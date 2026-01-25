@@ -19,15 +19,26 @@ This demo implements a **human checkpoint for code deployment**. Before any PR c
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  2. REVIEWER opens attestation UI                                       │
-│     • Loads PR details (title, description, changed files)              │
-│     • Selects execution path: Canary (1 approval) or Full (2 approvals) │
-│     • Reviews actual code changes                                       │
-│     • Confirms understanding via checkboxes:                            │
-│       ☑ I understand the problem being solved                          │
-│       ☑ I understand the objective                                     │
-│       ☑ I accept the tradeoffs                                         │
-│     • Selects their role (Engineering / Release Management)             │
+│  2. REVIEWER opens attestation UI and progresses through 6 gates:       │
+│                                                                         │
+│     Gate 1: Frame                                                       │
+│       • Load PR (title, description, changed files)                     │
+│       • Select execution path: Canary or Full                           │
+│                                                                         │
+│     Gate 2: Decision Owner                                              │
+│       • Select and lock role (Engineering / Release Management)         │
+│                                                                         │
+│     Gate 3: Problem                                                     │
+│       • Articulate in your own words: what problem does this solve?     │
+│                                                                         │
+│     Gate 4: Objective                                                   │
+│       • Articulate in your own words: what outcome are you approving?   │
+│                                                                         │
+│     Gate 5: Tradeoffs                                                   │
+│       • Articulate: what risks are you accepting under this path/role?  │
+│                                                                         │
+│     Gate 6: Commitment                                                  │
+│       • Review summary and sign attestation                             │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -44,6 +55,14 @@ This demo implements a **human checkpoint for code deployment**. Before any PR c
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Navigation
+
+The UI features a persistent navigation bar showing:
+- **AI Assistant** link (left) - Configure optional AI assistance
+- **6 Gate pills** - Visual progress through the attestation flow
+
+Gates can be revisited and edited after completion. Changes are held in draft state until explicitly saved.
+
 ### What Gets Verified
 
 The GitHub Action checks:
@@ -55,6 +74,8 @@ The GitHub Action checks:
 ## AI Assistant (Advisory Boundary)
 
 This demo includes an optional AI assistant to help reviewers understand changes before approving. The AI can answer questions, summarize diffs, and surface potential issues — but it has no authority in the decision process.
+
+AI configuration is available from the **AI Assistant** link in the navigation bar. You can change settings at any time during the review.
 
 ### AI Options
 
@@ -171,27 +192,31 @@ Without this setup, the workflow will report status but won't block merges.
 ### Single Approval (Canary Path)
 
 1. Create a PR to the `main` branch
-2. Run `pnpm dev:server` and `pnpm dev:ui`
+2. Run `pnpm dev:ui` (or also `pnpm dev:server` if running locally)
 3. Open http://localhost:3000
-4. Enter the PR URL and click "Load PR"
-5. Select **Canary (gradual rollout)** execution path
-6. Review changes and check the confirmation boxes
-7. Select **Engineering** role
-8. Click "Request Attestation"
-9. Click "Post Attestation to PR" to add it as a PR comment
-10. The GitHub Action will verify the attestation and allow merge
+4. Configure AI Assistant (optional) or click Continue to skip
+5. **Gate 1 - Frame:** Enter the PR URL, click "Load PR", select **Canary** path, close gate
+6. **Gate 2 - Decision Owner:** Select **Engineering** role, lock role and close gate
+7. **Gate 3 - Problem:** Write what problem this change addresses (20-240 chars), close gate
+8. **Gate 4 - Objective:** Write what outcome you're approving (20-240 chars), close gate
+9. **Gate 5 - Tradeoffs:** Write what risks you accept as Engineering under Canary, close gate
+10. **Gate 6 - Commitment:** Review summary and click "Sign Attestation"
+11. Click "Post to PR Comment" to add the attestation to the PR
+12. The GitHub Action will verify the attestation and allow merge
 
 ### Multi-Person Approval (Full Path)
 
 For production deployments requiring multiple approvals:
 
-1. Create a PR and select **Full (immediate deployment)** path
-2. **Engineer** goes through the UI:
-   - Select role: **Engineering**
-   - Complete attestation and post to PR
+1. Create a PR and in Gate 1, select **Full (immediate deployment)** path
+2. **Engineer** goes through all 6 gates:
+   - Gate 2: Select role **Engineering**
+   - Gates 3-5: Articulate problem, objective, and tradeoffs
+   - Gate 6: Sign and post attestation to PR
 3. **Release Manager** goes through the UI separately:
-   - Select role: **Release Management**
-   - Complete attestation and post as another PR comment
+   - Gate 2: Select role **Release Management**
+   - Gates 3-5: Articulate from their perspective
+   - Gate 6: Sign and post as another PR comment
 4. GitHub Action verifies both attestations are present and valid
 5. Merge is allowed only when all required roles have attested
 
