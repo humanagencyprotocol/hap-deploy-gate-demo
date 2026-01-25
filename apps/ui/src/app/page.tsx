@@ -13,7 +13,7 @@ import {
 } from '../local-ai/client';
 
 /**
- * HAP Deploy Gate Demo - UI
+ * HAP Deploy Demo - UI
  *
  * Gate order (HAP v0.2):
  * 1. Frame - repo, sha, env, execution path, disclosures
@@ -132,8 +132,6 @@ export default function Home() {
   // PR data
   const [prDetails, setPrDetails] = useState<PRDetails | null>(null);
   const [prFiles, setPrFiles] = useState<PRFile[]>([]);
-  const [owner, setOwner] = useState('');
-  const [repo, setRepo] = useState('');
 
   // Existing attestations
   const [existingAttestations, setExistingAttestations] = useState<ExistingAttestation[]>([]);
@@ -171,7 +169,6 @@ export default function Home() {
 
   // Result
   const [attestationResult, setAttestationResult] = useState<AttestationResult | null>(null);
-  const [commentUrl, setCommentUrl] = useState<string | null>(null);
 
   // AI Configuration
   const [aiMode, setAiMode] = useState<AIMode>('none');
@@ -394,8 +391,6 @@ export default function Home() {
 
       setPrDetails(details);
       setPrFiles(files);
-      setOwner(parsed.owner);
-      setRepo(parsed.repo);
       setSelectedFiles(new Set(files.map(f => f.filename)));
 
       const commentsRes = await fetch(`/api/comments?owner=${parsed.owner}&repo=${parsed.repo}&pr=${parsed.number}`);
@@ -471,84 +466,6 @@ export default function Home() {
     }
   }, [prDetails, executionPath, targetEnv, selectedFiles, selectedRole]);
 
-  const postComment = useCallback(async () => {
-    if (!prDetails || !attestationResult) return;
-
-    setError(null);
-    setLoading(true);
-
-    const roleLabel = ROLE_INFO[selectedRole].label;
-    const pathLabel = executionPath === 'canary' ? 'Canary (gradual rollout)' : 'Full (immediate deployment)';
-
-    const commentBody = `## HAP Deploy Gate Attestation
-
-**Profile:** \`deploy-gate@0.2\`
-**Role:** \`${selectedRole}\` (${roleLabel})
-**Execution Path:** \`${executionPath}\` (${pathLabel})
-**Environment:** \`${targetEnv}\`
-**Commit:** \`${prDetails.head.sha}\`
-
-### Disclosures
-${Array.from(selectedFiles).map(f => `- \`${f}\``).join('\n')}
-
-### Gates Closed
-- [x] Gate 1: Frame validated
-- [x] Gate 2: Decision Owner confirmed (${roleLabel})
-- [x] Gate 3: Problem articulated
-- [x] Gate 4: Objective articulated
-- [x] Gate 5: Tradeoffs accepted (as ${roleLabel} under ${executionPath})
-- [x] Gate 6: Commitment signed
-
----
-
-\`\`\`
----BEGIN HAP_ATTESTATION v=1---
-profile=deploy-gate@0.2
-role=${selectedRole}
-env=${targetEnv}
-path=${executionPath}
-sha=${prDetails.head.sha}
-frame_hash=${attestationResult.frame_hash}
-disclosure_hash=${attestationResult.disclosure_hash}
-blob=${attestationResult.attestation}
----END HAP_ATTESTATION---
-\`\`\`
-
-*Attestation expires: ${new Date(attestationResult.expires_at).toLocaleString()}*`;
-
-    try {
-      const response = await fetch('/api/comment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          owner,
-          repo,
-          pullNumber: prDetails.number,
-          body: commentBody,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to post comment');
-      }
-
-      setCommentUrl(data.comment_url);
-
-      setExistingAttestations(prev => [...prev, {
-        role: selectedRole,
-        sha: prDetails.head.sha,
-        profile: 'deploy-gate@0.2',
-        comment_id: data.comment_id,
-      }]);
-    } catch (err) {
-      setError(`Failed to post comment: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [prDetails, attestationResult, executionPath, targetEnv, selectedFiles, owner, repo, selectedRole]);
-
   // Initialize drafts from saved values when opening a completed gate for editing
   const initializeDrafts = (gate: Gate) => {
     if (gate === 'frame') {
@@ -565,6 +482,9 @@ blob=${attestationResult.attestation}
 
   // Handle navigation click
   const handleNavClick = (gate: Gate | 'ai-setup') => {
+    // Don't allow navigation once attestation is issued
+    if (attestationResult) return;
+
     if (gate === 'ai-setup') {
       setExpandedGate(expandedGate === 'ai-setup' ? currentGate : 'ai-setup');
     } else if (isGateAccessible(gate)) {
@@ -674,9 +594,9 @@ blob=${attestationResult.attestation}
 
   return (
     <main style={{ maxWidth: '900px', margin: '0 auto', padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>
-      <h1 style={{ marginBottom: '0.5rem' }}>HAP Deploy Gate</h1>
-      <p style={{ color: '#666', marginBottom: '1.5rem' }}>
-        Human Agency Protocol v0.2
+      <h1 style={{ marginBottom: '0.5rem' }}>HAP Deploy Demo</h1>
+      <p style={{ color: '#666', marginBottom: '1.5rem', lineHeight: '1.5' }}>
+        A human checkpoint that prevents direction drift. Before code ships, decision owners articulate the problem, objective, and tradeoffs in their domain — creating cryptographic proof of informed approval — not just a rubber stamp.
       </p>
 
       {/* Navigation Bar */}
@@ -723,10 +643,11 @@ blob=${attestationResult.attestation}
 
         {/* Gate Pills */}
         {GATES.map((gate, i) => {
-          const isAccessible = isGateAccessible(gate.id);
+          const isAccessible = isGateAccessible(gate.id) && !attestationResult;
           const isCompleted = isGateCompleted(gate.id);
           const isCurrent = currentGate === gate.id;
           const isExpanded = expandedGate === gate.id;
+          const isLocked = !!attestationResult;
 
           return (
             <div key={gate.id} style={{ display: 'flex', alignItems: 'center' }}>
@@ -738,24 +659,24 @@ blob=${attestationResult.attestation}
                   alignItems: 'center',
                   gap: '0.4rem',
                   padding: '0.5rem 0.75rem',
-                  backgroundColor: isExpanded ? '#1976d2' : isCompleted ? '#4caf50' : isCurrent ? '#e3f2fd' : 'transparent',
-                  color: isExpanded ? 'white' : isCompleted ? 'white' : isCurrent ? '#1976d2' : isAccessible ? '#666' : '#bbb',
-                  border: isExpanded || isCompleted ? 'none' : isCurrent ? '2px solid #1976d2' : '1px solid #ddd',
+                  backgroundColor: isLocked ? '#4caf50' : isExpanded ? '#1976d2' : isCompleted ? '#4caf50' : isCurrent ? '#e3f2fd' : 'transparent',
+                  color: isLocked ? 'white' : isExpanded ? 'white' : isCompleted ? 'white' : isCurrent ? '#1976d2' : isAccessible ? '#666' : '#bbb',
+                  border: isLocked || isExpanded || isCompleted ? 'none' : isCurrent ? '2px solid #1976d2' : '1px solid #ddd',
                   borderRadius: '20px',
-                  cursor: isAccessible ? 'pointer' : 'not-allowed',
+                  cursor: isLocked ? 'default' : isAccessible ? 'pointer' : 'not-allowed',
                   fontSize: '0.85rem',
                   fontWeight: isCurrent || isExpanded ? 600 : 400,
-                  opacity: isAccessible ? 1 : 0.5,
+                  opacity: 1,
                 }}
               >
-                {isCompleted && !isExpanded && <span>&#10003;</span>}
+                {(isCompleted || isLocked) && !isExpanded && <span>&#10003;</span>}
                 <span>{gate.label}</span>
               </button>
               {i < GATES.length - 1 && (
                 <div style={{
                   width: '16px',
                   height: '2px',
-                  backgroundColor: isCompleted ? '#4caf50' : '#ddd',
+                  backgroundColor: isCompleted || isLocked ? '#4caf50' : '#ddd',
                   margin: '0 0.25rem',
                 }} />
               )}
@@ -1432,27 +1353,61 @@ blob=${attestationResult.attestation}
             <p><strong>Frame Hash:</strong></p>
             <code style={{ fontSize: '0.85rem', wordBreak: 'break-all' }}>{attestationResult.frame_hash}</code>
           </div>
-          <div style={{ marginBottom: '1rem' }}>
+          <div style={{ marginBottom: '1.5rem' }}>
             <p><strong>Expires:</strong> {new Date(attestationResult.expires_at).toLocaleString()}</p>
           </div>
 
-          {commentUrl ? (
-            <div style={{ color: '#2e7d32', backgroundColor: '#e8f5e9', padding: '1rem', borderRadius: '4px', marginBottom: '1rem' }}>
-              Comment posted! <a href={commentUrl} target="_blank" rel="noopener noreferrer">View on GitHub</a>
-            </div>
-          ) : (
+          <div style={{ backgroundColor: '#f5f5f5', padding: '1rem', borderRadius: '4px', marginBottom: '1rem' }}>
+            <p style={{ margin: '0 0 0.75rem', fontWeight: 'bold' }}>Next step:</p>
+            <p style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: '#666' }}>
+              Copy the attestation below and paste it as a comment on your pull request. The GitHub Action will verify it and allow the merge.
+            </p>
             <button
-              style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: loading ? '#ccc' : '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: loading ? 'not-allowed' : 'pointer' }}
-              onClick={postComment}
-              disabled={loading}
-            >
-              {loading ? 'Posting...' : 'Post to PR Comment'}
-            </button>
-          )}
+              style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              onClick={() => {
+                const attestationText = `## HAP Deploy Demo Attestation
 
-          <details style={{ marginTop: '1.5rem' }}>
-            <summary style={{ cursor: 'pointer' }}>View Raw Attestation</summary>
-            <pre style={{ backgroundColor: '#263238', color: '#aed581', padding: '1rem', borderRadius: '4px', overflow: 'auto', fontSize: '0.85rem', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+**Profile:** \`deploy-gate@0.2\`
+**Role:** \`${selectedRole}\` (${ROLE_INFO[selectedRole].label})
+**Execution Path:** \`${executionPath}\` (${executionPath === 'canary' ? 'Canary (gradual rollout)' : 'Full (immediate deployment)'})
+**Environment:** \`${targetEnv}\`
+**Commit:** \`${prDetails?.head.sha}\`
+
+### Gates Closed
+- [x] Gate 1: Frame validated
+- [x] Gate 2: Decision Owner confirmed (${ROLE_INFO[selectedRole].label})
+- [x] Gate 3: Problem articulated
+- [x] Gate 4: Objective articulated
+- [x] Gate 5: Tradeoffs accepted (as ${ROLE_INFO[selectedRole].label} under ${executionPath})
+- [x] Gate 6: Commitment signed
+
+---
+
+\`\`\`
+---BEGIN HAP_ATTESTATION v=1---
+profile=deploy-gate@0.2
+role=${selectedRole}
+env=${targetEnv}
+path=${executionPath}
+sha=${prDetails?.head.sha}
+frame_hash=${attestationResult.frame_hash}
+disclosure_hash=${attestationResult.disclosure_hash}
+blob=${attestationResult.attestation}
+---END HAP_ATTESTATION---
+\`\`\`
+
+*Attestation expires: ${new Date(attestationResult.expires_at).toLocaleString()}*`;
+                navigator.clipboard.writeText(attestationText);
+                alert('Attestation copied to clipboard!');
+              }}
+            >
+              Copy Attestation
+            </button>
+          </div>
+
+          <details>
+            <summary style={{ cursor: 'pointer', color: '#666' }}>View raw attestation block</summary>
+            <pre style={{ backgroundColor: '#263238', color: '#aed581', padding: '1rem', borderRadius: '4px', overflow: 'auto', fontSize: '0.85rem', whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: '0.5rem' }}>
 {`---BEGIN HAP_ATTESTATION v=1---
 profile=deploy-gate@0.2
 role=${selectedRole}
