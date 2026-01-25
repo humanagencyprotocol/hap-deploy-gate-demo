@@ -4,6 +4,8 @@ As AI becomes capable of writing and shipping code autonomously, we need guardra
 
 The full protocol goes further: domain-specific gates tailored to context, verified identity, integration with deployment systems and AI-assisted review that helps humans understand complex changes — not bypass them. The goal is twofold: prevent gradual loss of direction as systems scale, and provide clear, attributable authorization in high-risk or regulated environments where decisions must be explicit and defensible.
 
+**Live Demo:** [demo.humanagencyprotocol.org](https://demo.humanagencyprotocol.org/)
+
 **GitHub:** [github.com/humanagencyprotocol/hap-deploy-gate-demo](https://github.com/humanagencyprotocol/hap-deploy-gate-demo)
 
 ## How It Works
