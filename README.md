@@ -52,9 +52,17 @@ The GitHub Action checks:
 - ✓ Attestation hasn't expired
 - ✓ All required roles have attested (Engineering for Canary, Engineering + Release Management for Full)
 
-## Trusted AI Assistant (Advisory Boundary)
+## AI Assistant (Advisory Boundary)
 
-This demo includes a trusted AI assistant to help reviewers understand changes before approving. The AI can answer questions, summarize diffs, and surface potential issues — but it has no authority in the decision process.
+This demo includes an optional AI assistant to help reviewers understand changes before approving. The AI can answer questions, summarize diffs, and surface potential issues — but it has no authority in the decision process.
+
+### AI Options
+
+1. **Local/Private AI (Recommended)** — Run AI locally with Ollama. Your data never leaves your machine. This is the trusted option.
+
+2. **Public AI (Demo only)** — Use OpenAI, Groq, or other cloud providers. **Warning:** Do not use with sensitive or confidential data. PR content will be sent to external servers.
+
+3. **No AI** — Review changes without AI assistance.
 
 ### What AI Can Do
 
@@ -75,8 +83,6 @@ This demo includes a trusted AI assistant to help reviewers understand changes b
 All AI output remains local and is never included in the signed attestation. The system records **what was approved** — not the AI's reasoning or the reviewer's intent.
 
 > **Approval is always a human act, based on explicit structural commitments.**
-
-AI configuration is optional and can be set at the start of the review process. You can use a trusted provider, configure your own endpoint, or disable AI entirely.
 
 ## Structure
 
