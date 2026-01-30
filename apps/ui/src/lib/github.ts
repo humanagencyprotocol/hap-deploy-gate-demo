@@ -1,4 +1,5 @@
 import { Octokit } from '@octokit/rest';
+import type { DecisionFile } from '@hap-demo/core';
 
 export interface PRDetails {
   number: number;
@@ -132,4 +133,115 @@ export async function postPRComment(
   });
 
   return data.html_url;
+}
+
+/**
+ * Result of fetching a decision file
+ */
+export interface DecisionFileResult {
+  found: boolean;
+  decisionFile: DecisionFile | null;
+  error?: string;
+}
+
+/**
+ * Fetch the .hap/decision.json file from a specific commit
+ *
+ * @param owner - Repository owner
+ * @param repo - Repository name
+ * @param sha - Commit SHA to fetch the file from
+ * @param token - GitHub token (optional but recommended)
+ * @returns The decision file content or null if not found
+ */
+export async function fetchDecisionFile(
+  owner: string,
+  repo: string,
+  sha: string,
+  token?: string
+): Promise<DecisionFileResult> {
+  const octokit = new Octokit({ auth: token });
+  const filePath = '.hap/decision.json';
+
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner,
+      repo,
+      path: filePath,
+      ref: sha,
+    });
+
+    // getContent returns an array for directories, single object for files
+    if (Array.isArray(data)) {
+      return {
+        found: false,
+        decisionFile: null,
+        error: `${filePath} is a directory, expected a file`,
+      };
+    }
+
+    if (data.type !== 'file') {
+      return {
+        found: false,
+        decisionFile: null,
+        error: `${filePath} is not a file (type: ${data.type})`,
+      };
+    }
+
+    // Decode base64 content
+    const content = Buffer.from(data.content, 'base64').toString('utf8');
+
+    try {
+      const decisionFile = JSON.parse(content) as DecisionFile;
+
+      // Validate required fields
+      if (!decisionFile.profile) {
+        return {
+          found: true,
+          decisionFile: null,
+          error: 'Decision file missing required field: profile',
+        };
+      }
+      if (!decisionFile.execution_path) {
+        return {
+          found: true,
+          decisionFile: null,
+          error: 'Decision file missing required field: execution_path',
+        };
+      }
+      if (!decisionFile.disclosure || typeof decisionFile.disclosure !== 'object') {
+        return {
+          found: true,
+          decisionFile: null,
+          error: 'Decision file missing required field: disclosure',
+        };
+      }
+
+      return {
+        found: true,
+        decisionFile,
+      };
+    } catch {
+      return {
+        found: true,
+        decisionFile: null,
+        error: 'Decision file is not valid JSON',
+      };
+    }
+  } catch (error) {
+    // Check if it's a 404 (file not found)
+    if (error instanceof Error && 'status' in error && (error as { status: number }).status === 404) {
+      return {
+        found: false,
+        decisionFile: null,
+        error: `No ${filePath} found in commit ${sha.slice(0, 7)}`,
+      };
+    }
+
+    // Other error
+    return {
+      found: false,
+      decisionFile: null,
+      error: `Failed to fetch ${filePath}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
 }

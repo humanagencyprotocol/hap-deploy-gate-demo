@@ -1,7 +1,9 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
-import { parsePRInput, fetchPRDetails, fetchPRFiles, PRDetails, PRFile } from '../lib/github';
+import { parsePRInput, fetchPRDetails, fetchPRFiles, fetchDecisionFile, PRDetails, PRFile, DecisionFileResult } from '../lib/github';
+import type { DecisionFile } from '@hap-demo/core';
+import { getLatestProfile } from '@hap-demo/core';
 import {
   LocalAIConfig,
   DEFAULT_AI_CONFIG,
@@ -15,20 +17,20 @@ import {
 /**
  * HAP Deploy Demo - UI
  *
- * Gate order (HAP v0.2):
- * 1. Frame - repo, sha, env, execution path, disclosures
- * 2. Decision Owner - role + scope (who is responsible)
- * 3. Problem - human articulation of the problem
- * 4. Objective - human articulation of the objective
- * 5. Tradeoffs - risk acceptance by THIS role under THIS path
+ * Gate order (HAP v0.3):
+ * 1. Decision Owner - select your role/domain first
+ * 2. Frame - load PR, select files, execution path
+ * 3. Problem - articulate the problem from your domain's perspective
+ * 4. Objective - articulate the objective from your domain's perspective
+ * 5. Tradeoffs - accept tradeoffs from your domain's perspective
  * 6. Commitment - explicit authorization (signing)
  *
- * Invariant: Tradeoffs are accepted by a role, not by a change.
- * Therefore, role selection must precede tradeoff articulation.
+ * Invariant: Domain selection precedes disclosure.
+ * Tradeoffs are accepted by a role, not by a change.
  */
 
-type Gate = 'frame' | 'decision-owner' | 'problem' | 'objective' | 'tradeoffs' | 'commitment' | 'done';
-type Role = 'engineering' | 'release_management';
+type Gate = 'decision-owner' | 'frame' | 'problem' | 'objective' | 'tradeoffs' | 'commitment' | 'done';
+type Role = 'engineering' | 'release_management' | 'marketing' | 'security';
 type AIMode = 'local' | 'public' | 'none';
 
 interface AttestationResult {
@@ -54,18 +56,27 @@ const ROLE_INFO: Record<Role, { label: string; description: string }> = {
     label: 'Release Management',
     description: 'Release approval - verify deployment readiness and rollout plan',
   },
+  marketing: {
+    label: 'Marketing',
+    description: 'User-facing review - verify behavior changes and rollout communication',
+  },
+  security: {
+    label: 'Security',
+    description: 'Security review - verify threat assessment and mitigation',
+  },
 };
 
+// v0.3: Gate order - domain first, then frame, then disclosure gates
 const GATES: { id: Gate; label: string }[] = [
-  { id: 'frame', label: 'Frame' },
   { id: 'decision-owner', label: 'Decision Owner' },
+  { id: 'frame', label: 'Frame' },
   { id: 'problem', label: 'Problem' },
   { id: 'objective', label: 'Objective' },
   { id: 'tradeoffs', label: 'Tradeoffs' },
   { id: 'commitment', label: 'Commitment' },
 ];
 
-const gateOrder: Gate[] = ['frame', 'decision-owner', 'problem', 'objective', 'tradeoffs', 'commitment', 'done'];
+const gateOrder: Gate[] = ['decision-owner', 'frame', 'problem', 'objective', 'tradeoffs', 'commitment', 'done'];
 
 function getStatusBadge(status: string) {
   const colors: Record<string, { bg: string; text: string }> = {
@@ -122,7 +133,7 @@ function parseAttestationsFromComments(comments: Array<{ id: number; body: strin
 
 export default function Home() {
   // Navigation state
-  const [currentGate, setCurrentGate] = useState<Gate>('frame');
+  const [currentGate, setCurrentGate] = useState<Gate>('decision-owner');
   const [expandedGate, setExpandedGate] = useState<Gate | 'ai-setup' | null>('ai-setup');
 
   const [prInput, setPrInput] = useState('');
@@ -132,6 +143,10 @@ export default function Home() {
   // PR data
   const [prDetails, setPrDetails] = useState<PRDetails | null>(null);
   const [prFiles, setPrFiles] = useState<PRFile[]>([]);
+
+  // v0.3: Decision file from commit
+  const [decisionFileResult, setDecisionFileResult] = useState<DecisionFileResult | null>(null);
+  const [showFullDecisionFile, setShowFullDecisionFile] = useState(false);
 
   // Existing attestations
   const [existingAttestations, setExistingAttestations] = useState<ExistingAttestation[]>([]);
@@ -190,16 +205,16 @@ export default function Home() {
     if (savedMode === 'local') {
       setAiMode('local');
       setAiConfig({ ...PROVIDER_PRESETS.ollama, enabled: true } as LocalAIConfig);
-      setExpandedGate('frame');
+      setExpandedGate('decision-owner');
     } else if (savedMode === 'public' && shouldSave && savedKey) {
       setAiMode('public');
       const preset = savedProvider && PROVIDER_PRESETS[savedProvider] ? PROVIDER_PRESETS[savedProvider] : PROVIDER_PRESETS.openai;
       setAiConfig({ ...preset, enabled: true, apiKey: savedKey } as LocalAIConfig);
       setSelectedProvider(savedProvider || 'openai');
       setSaveApiKey(true);
-      setExpandedGate('frame');
+      setExpandedGate('decision-owner');
     } else if (savedMode === 'none') {
-      setExpandedGate('frame');
+      setExpandedGate('decision-owner');
     }
   }, []);
 
@@ -376,6 +391,7 @@ export default function Home() {
 
   const loadPR = useCallback(async () => {
     setError(null);
+    setDecisionFileResult(null);
     const parsed = parsePRInput(prInput);
     if (!parsed) {
       setError('Invalid PR URL or format. Use: owner/repo#123 or https://github.com/owner/repo/pull/123');
@@ -392,6 +408,26 @@ export default function Home() {
       setPrDetails(details);
       setPrFiles(files);
       setSelectedFiles(new Set(files.map(f => f.filename)));
+
+      // v0.3: Fetch decision file from commit
+      const decisionResult = await fetchDecisionFile(parsed.owner, parsed.repo, details.head.sha);
+      setDecisionFileResult(decisionResult);
+
+      // If decision file found, set execution path from it
+      if (decisionResult.found && decisionResult.decisionFile) {
+        const pathFromDecision = decisionResult.decisionFile.execution_path;
+        // Map to UI path format
+        if (pathFromDecision === 'deploy-prod-canary') {
+          setExecutionPath('canary');
+        } else if (pathFromDecision === 'deploy-prod-full') {
+          setExecutionPath('full');
+        }
+        // Set changed paths from decision file if available
+        const engineeringDisclosure = decisionResult.decisionFile.disclosure.engineering;
+        if (engineeringDisclosure && Array.isArray(engineeringDisclosure.changed_paths)) {
+          setSelectedFiles(new Set(engineeringDisclosure.changed_paths));
+        }
+      }
 
       const commentsRes = await fetch(`/api/comments?owner=${parsed.owner}&repo=${parsed.repo}&pr=${parsed.number}`);
       if (commentsRes.ok) {
@@ -425,10 +461,27 @@ export default function Home() {
     setLoading(true);
 
     try {
-      const response = await fetch('/api/attest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      // v0.3: Use decision file if available
+      const hasDecisionFile = decisionFileResult?.found && decisionFileResult?.decisionFile;
+
+      let requestBody;
+      if (hasDecisionFile) {
+        // v0.3 request format
+        requestBody = {
+          profile_id: decisionFileResult.decisionFile!.profile,
+          execution_path: decisionFileResult.decisionFile!.execution_path,
+          domain: selectedRole,
+          frame: {
+            repo: prDetails.repo,
+            sha: prDetails.head.sha,
+            env: targetEnv,
+          },
+          decision_file: decisionFileResult.decisionFile,
+          ttl_seconds: 3600,
+        };
+      } else {
+        // Legacy v0.2 request format
+        requestBody = {
           profile_id: 'deploy-gate@0.2',
           execution_path: executionPath,
           role: selectedRole,
@@ -447,7 +500,13 @@ export default function Home() {
             tradeoffs_acceptable: true,
           },
           ttl_seconds: 3600,
-        }),
+        };
+      }
+
+      const response = await fetch('/api/attest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
       });
 
       const data = await response.json();
@@ -464,20 +523,16 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [prDetails, executionPath, targetEnv, selectedFiles, selectedRole]);
+  }, [prDetails, executionPath, targetEnv, selectedFiles, selectedRole, decisionFileResult]);
 
   // Initialize drafts from saved values when opening a completed gate for editing
   const initializeDrafts = (gate: Gate) => {
     if (gate === 'frame') {
       setSelectedFilesDraft(new Set(selectedFiles));
       setExecutionPathDraft(executionPath);
-    } else if (gate === 'problem') {
-      setProblemDraft(problemText);
-    } else if (gate === 'objective') {
-      setObjectiveDraft(objectiveText);
-    } else if (gate === 'tradeoffs') {
-      setTradeoffsDraft(tradeoffsText);
     }
+    // v0.3: commitment gate doesn't need drafts
+    // The disclosure content comes from the decision file (read-only)
   };
 
   // Handle navigation click
@@ -846,7 +901,7 @@ export default function Home() {
               const valid = await validateAndTestAI();
               if (valid) {
                 localStorage.setItem('hap_ai_mode', aiMode);
-                setExpandedGate('frame');
+                setExpandedGate('decision-owner');
               }
             }}
           >
@@ -855,12 +910,12 @@ export default function Home() {
         </section>
       )}
 
-      {/* GATE 1: Frame */}
+      {/* GATE 2: Frame (includes PR, disclosure, and execution path) */}
       {expandedGate === 'frame' && (
         <section style={{ padding: '1.5rem', backgroundColor: '#fff', borderRadius: '8px', marginBottom: '1.5rem', border: '2px solid #1976d2' }}>
-          <h2>Gate 1: Frame</h2>
+          <h2>Gate 2: Frame</h2>
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
-            Define what could happen and under what constraints.
+            Load the PR, review the disclosure for your domain ({ROLE_INFO[selectedRole].label}), and confirm the execution path.
           </p>
 
           {!prDetails ? (
@@ -891,6 +946,69 @@ export default function Home() {
                 </p>
               </div>
 
+              {/* v0.3: Decision File Status */}
+              {decisionFileResult && (
+                <div style={{
+                  marginBottom: '1.5rem',
+                  padding: '1rem',
+                  backgroundColor: decisionFileResult.found && decisionFileResult.decisionFile ? '#e8f5e9' : '#fff3e0',
+                  borderRadius: '4px',
+                  border: decisionFileResult.found && decisionFileResult.decisionFile ? '1px solid #81c784' : '1px solid #ffb74d'
+                }}>
+                  {decisionFileResult.found && decisionFileResult.decisionFile ? (
+                    <>
+                      <p style={{ margin: 0, fontWeight: 'bold', color: '#2e7d32' }}>
+                        &#10003; Decision file found (.hap/decision.json)
+                      </p>
+                      <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.5rem 0 0' }}>
+                        <strong>Profile:</strong> {decisionFileResult.decisionFile.profile}<br />
+                        <strong>Proposed Path:</strong> {decisionFileResult.decisionFile.execution_path}<br />
+                        <strong>Domains with disclosure:</strong> {Object.keys(decisionFileResult.decisionFile.disclosure).join(', ')}
+                      </p>
+                      <button
+                        onClick={() => setShowFullDecisionFile(!showFullDecisionFile)}
+                        style={{
+                          marginTop: '0.5rem',
+                          padding: '0.25rem 0.5rem',
+                          fontSize: '0.85rem',
+                          backgroundColor: 'transparent',
+                          border: '1px solid #666',
+                          borderRadius: '4px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        {showFullDecisionFile ? 'Hide' : 'View'} full decision file
+                      </button>
+                      {showFullDecisionFile && (
+                        <pre style={{
+                          marginTop: '0.5rem',
+                          padding: '0.5rem',
+                          backgroundColor: '#fff',
+                          borderRadius: '4px',
+                          fontSize: '0.75rem',
+                          overflow: 'auto',
+                          maxHeight: '300px'
+                        }}>
+                          {JSON.stringify(decisionFileResult.decisionFile, null, 2)}
+                        </pre>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <p style={{ margin: 0, fontWeight: 'bold', color: '#e65100' }}>
+                        &#9888; No decision file found
+                      </p>
+                      <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.5rem 0 0' }}>
+                        {decisionFileResult.error || 'This commit does not contain a .hap/decision.json file.'}
+                      </p>
+                      <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.5rem 0 0' }}>
+                        v0.3 requires a decision file in the commit. The developer should add .hap/decision.json with the execution path and disclosure information.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+
               {existingAttestations.length > 0 && (
                 <div style={{ marginBottom: '1rem' }}>
                   <p style={{ fontSize: '0.9rem', fontWeight: 'bold', marginBottom: '0.5rem' }}>Existing Attestations:</p>
@@ -904,26 +1022,8 @@ export default function Home() {
 
               {(() => {
                 const isEditing = isGateCompleted('frame');
-                const displayFiles = isEditing ? selectedFilesDraft : selectedFiles;
                 const displayPath = isEditing ? executionPathDraft : executionPath;
-                const hasChanges = isEditing && (
-                  selectedFilesDraft.size !== selectedFiles.size ||
-                  [...selectedFilesDraft].some(f => !selectedFiles.has(f)) ||
-                  executionPathDraft !== executionPath
-                );
-
-                const toggleFileHandler = (filename: string) => {
-                  if (isEditing) {
-                    setSelectedFilesDraft(prev => {
-                      const next = new Set(prev);
-                      if (next.has(filename)) next.delete(filename);
-                      else next.add(filename);
-                      return next;
-                    });
-                  } else {
-                    toggleFile(filename);
-                  }
-                };
+                const hasChanges = isEditing && executionPathDraft !== executionPath;
 
                 const setPathHandler = (path: 'canary' | 'full') => {
                   if (isEditing) {
@@ -934,7 +1034,6 @@ export default function Home() {
                 };
 
                 const saveChanges = () => {
-                  setSelectedFiles(new Set(selectedFilesDraft));
                   setExecutionPath(executionPathDraft);
                   setExpandedGate(currentGate);
                 };
@@ -943,12 +1042,11 @@ export default function Home() {
                   <>
                     <div style={{ marginBottom: '1.5rem' }}>
                       <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
-                        Changed Files ({displayFiles.size} of {prFiles.length} selected)
+                        Changed Files ({prFiles.length})
                       </label>
                       <ul style={{ listStyle: 'none', padding: 0, margin: '1rem 0', maxHeight: '300px', overflow: 'auto' }}>
                         {prFiles.map((file) => (
                           <li key={file.filename} style={{ padding: '0.5rem', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center' }}>
-                            <input type="checkbox" checked={displayFiles.has(file.filename)} onChange={() => toggleFileHandler(file.filename)} style={{ marginRight: '0.5rem', width: '18px', height: '18px' }} />
                             <code style={{ flex: 1, fontSize: '0.85rem' }}>{file.filename}</code>
                             {getStatusBadge(file.status)}
                             <span style={{ marginLeft: '0.5rem', fontSize: '0.8rem', color: '#666' }}>+{file.additions} -{file.deletions}</span>
@@ -960,32 +1058,128 @@ export default function Home() {
                     <div style={{ marginBottom: '1.5rem' }}>
                       <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>Execution Path</label>
                       <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '0.5rem' }}>
-                        This constrains how the system may deploy.
+                        {decisionFileResult?.decisionFile
+                          ? 'The developer has proposed an execution path. You can view alternatives below.'
+                          : 'This constrains how the system may deploy.'}
                       </p>
-                      <div>
-                        <label style={{ display: 'block', marginBottom: '0.5rem', cursor: 'pointer' }}>
-                          <input type="radio" name="path" value="canary" checked={displayPath === 'canary'} onChange={() => setPathHandler('canary')} style={{ marginRight: '0.5rem' }} />
-                          <strong>Canary</strong> &#8212; gradual rollout, reduced blast radius
-                        </label>
-                        <label style={{ display: 'block', cursor: 'pointer' }}>
-                          <input type="radio" name="path" value="full" checked={displayPath === 'full'} onChange={() => setPathHandler('full')} style={{ marginRight: '0.5rem' }} />
-                          <strong>Full</strong> &#8212; immediate rollout, higher risk
-                        </label>
-                      </div>
-                      {displayPath === 'full' && (
-                        <div style={{ marginTop: '0.5rem', padding: '0.5rem', backgroundColor: '#fff3e0', borderRadius: '4px', fontSize: '0.85rem', color: '#e65100' }}>
-                          Full deployment requires: Engineering + Release Management
-                        </div>
-                      )}
+
+                      {/* v0.3: Show all execution paths from profile */}
+                      {(() => {
+                        const profile = getLatestProfile();
+                        const proposedPath = decisionFileResult?.decisionFile?.execution_path;
+                        const pathEntries = Object.entries(profile.executionPaths);
+
+                        // Map full path names to UI values
+                        const pathToUiValue = (path: string): 'canary' | 'full' => {
+                          if (path === 'deploy-prod-canary') return 'canary';
+                          if (path === 'deploy-prod-full') return 'full';
+                          return 'canary'; // fallback
+                        };
+
+                        const uiValueToPath = (ui: 'canary' | 'full'): string => {
+                          if (ui === 'canary') return 'deploy-prod-canary';
+                          if (ui === 'full') return 'deploy-prod-full';
+                          return 'deploy-prod-canary';
+                        };
+
+                        const currentFullPath = uiValueToPath(displayPath);
+                        const isProposedPathSelected = proposedPath === currentFullPath;
+                        const hasDecisionFile = !!decisionFileResult?.decisionFile;
+
+                        return (
+                          <div>
+                            {pathEntries.map(([pathId, pathDef]) => {
+                              const isProposed = pathId === proposedPath;
+                              const uiValue = pathToUiValue(pathId);
+                              const isSelected = displayPath === uiValue;
+                              const requiredDomains = pathDef.requiredDomains || pathDef.requiredScopes.map(s => s.domain);
+
+                              return (
+                                <div
+                                  key={pathId}
+                                  style={{
+                                    marginBottom: '0.75rem',
+                                    padding: '0.75rem',
+                                    borderRadius: '4px',
+                                    border: isSelected ? '2px solid #1976d2' : isProposed ? '2px solid #4caf50' : '1px solid #ddd',
+                                    backgroundColor: isSelected ? '#e3f2fd' : isProposed ? '#e8f5e9' : '#fff',
+                                    opacity: hasDecisionFile && !isProposed ? 0.7 : 1,
+                                    cursor: 'pointer',
+                                  }}
+                                  onClick={() => setPathHandler(uiValue)}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                                      <input
+                                        type="radio"
+                                        name="path"
+                                        value={uiValue}
+                                        checked={isSelected}
+                                        onChange={() => setPathHandler(uiValue)}
+                                        style={{ marginRight: '0.5rem' }}
+                                      />
+                                      <strong>{pathDef.description}</strong>
+                                    </div>
+                                    {isProposed && (
+                                      <span style={{
+                                        backgroundColor: '#4caf50',
+                                        color: 'white',
+                                        padding: '0.2rem 0.5rem',
+                                        borderRadius: '4px',
+                                        fontSize: '0.75rem'
+                                      }}>
+                                        PROPOSED
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.5rem 0 0 1.5rem' }}>
+                                    Requires: {requiredDomains.map(d => d.replace('_', ' ')).join(' + ')}
+                                  </p>
+                                </div>
+                              );
+                            })}
+
+                            {/* Warning if non-proposed path selected */}
+                            {hasDecisionFile && !isProposedPathSelected && (
+                              <div style={{
+                                marginTop: '0.5rem',
+                                padding: '0.75rem',
+                                backgroundColor: '#ffebee',
+                                borderRadius: '4px',
+                                border: '1px solid #ef9a9a'
+                              }}>
+                                <p style={{ margin: 0, fontWeight: 'bold', color: '#c62828', fontSize: '0.9rem' }}>
+                                  &#9888; Path mismatch
+                                </p>
+                                <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.5rem 0 0' }}>
+                                  This commit proposes <strong>{proposedPath}</strong>.
+                                  To use a different path, the developer must amend the commit with a new .hap/decision.json.
+                                </p>
+                                <p style={{ fontSize: '0.85rem', color: '#c62828', margin: '0.5rem 0 0' }}>
+                                  Attestation will not be valid if the path doesn't match the decision file.
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {currentGate === 'frame' ? (
                       <button
-                        style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: displayFiles.size > 0 ? '#1976d2' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: displayFiles.size > 0 ? 'pointer' : 'not-allowed' }}
-                        disabled={displayFiles.size === 0}
-                        onClick={() => closeGateAndAdvance('decision-owner')}
+                        style={{
+                          padding: '0.75rem 1.5rem',
+                          fontSize: '1rem',
+                          backgroundColor: prFiles.length > 0 ? '#1976d2' : '#ccc',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: prFiles.length > 0 ? 'pointer' : 'not-allowed'
+                        }}
+                        disabled={prFiles.length === 0}
+                        onClick={() => closeGateAndAdvance('problem')}
                       >
-                        Close Gate 1
+                        Close Gate 2
                       </button>
                     ) : isEditing && (
                       <button
@@ -1004,12 +1198,12 @@ export default function Home() {
         </section>
       )}
 
-      {/* GATE 2: Decision Owner */}
-      {expandedGate === 'decision-owner' && prDetails && (
+      {/* GATE 1: Decision Owner */}
+      {expandedGate === 'decision-owner' && (
         <section style={{ padding: '1.5rem', backgroundColor: '#fff', borderRadius: '8px', marginBottom: '1.5rem', border: '2px solid #1976d2' }}>
-          <h2>Gate 2: Decision Owner</h2>
+          <h2>Gate 1: Decision Owner</h2>
           <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
-            Define who is responsible for this approval. Role is locked after this step.
+            Select your domain. This determines what disclosure you will review and attest to.
           </p>
 
           {roleLocked ? (
@@ -1062,10 +1256,10 @@ export default function Home() {
                   style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
                   onClick={() => {
                     setRoleLocked(true);
-                    closeGateAndAdvance('problem');
+                    closeGateAndAdvance('frame');
                   }}
                 >
-                  Lock Role &amp; Close Gate 2
+                  Lock Domain &amp; Continue
                 </button>
               ) : isGateCompleted('decision-owner') && (
                 <button
@@ -1084,64 +1278,57 @@ export default function Home() {
       {expandedGate === 'problem' && prDetails && !roleAlreadyAttested && (
         <section style={{ padding: '1.5rem', backgroundColor: '#fff', borderRadius: '8px', marginBottom: '1.5rem', border: '2px solid #1976d2' }}>
           <h2>Gate 3: Problem</h2>
-          <p style={{ fontSize: '0.9rem', color: '#333', marginBottom: '0.5rem' }}>
-            What concrete problem does this change address, and where does it surface?
-          </p>
-          <p style={{ fontSize: '0.8rem', color: '#999', marginBottom: '1rem' }}>
-            This is for your accountability. It is not evaluated by the system.
+          <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+            Articulate the problem this change addresses from the perspective of {ROLE_INFO[selectedRole].label}.
           </p>
 
-          {(() => {
-            const isEditing = isGateCompleted('problem');
-            const displayText = isEditing ? problemDraft : problemText;
-            const setDisplayText = isEditing ? setProblemDraft : setProblemText;
-            const validation = validateGateText(displayText, 'problem');
-            const hasChanges = isEditing && problemDraft !== problemText;
+          <div style={{ padding: '0.75rem 1rem', backgroundColor: '#e3f2fd', borderRadius: '4px', marginBottom: '1rem', border: '1px solid #90caf9' }}>
+            <strong>Attesting as:</strong> {ROLE_INFO[selectedRole].label}
+          </div>
 
-            const saveChanges = () => {
-              setProblemText(problemDraft);
-              setExpandedGate(currentGate);
-            };
+          <textarea
+            value={problemText}
+            onChange={(e) => setProblemText(e.target.value)}
+            placeholder={`What problem does this change solve for ${ROLE_INFO[selectedRole].label}?`}
+            style={{
+              width: '100%',
+              minHeight: '150px',
+              padding: '0.75rem',
+              fontSize: '0.95rem',
+              borderRadius: '4px',
+              border: '1px solid #ccc',
+              boxSizing: 'border-box',
+              resize: 'vertical',
+              marginBottom: '1rem'
+            }}
+          />
 
-            return (
-              <>
-                <textarea
-                  value={displayText}
-                  onChange={(e) => setDisplayText(e.target.value)}
-                  placeholder="Describe the problem..."
-                  style={{ width: '100%', padding: '0.75rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box', minHeight: '100px', resize: 'vertical' }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                  <span style={{ fontSize: '0.8rem', color: !validation.valid && displayText.length > 0 ? '#f44336' : '#666' }}>
-                    {validation.error || ''}
-                  </span>
-                  <span style={{ fontSize: '0.8rem', color: displayText.length < 20 || displayText.length > 240 ? '#f44336' : '#666' }}>
-                    {displayText.length}/240
-                  </span>
-                </div>
+          {renderAIAssistance('problem')}
 
-                {renderAIAssistance('problem')}
-
-                {currentGate === 'problem' ? (
-                  <button
-                    style={{ marginTop: '1rem', padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: validation.valid ? '#1976d2' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: validation.valid ? 'pointer' : 'not-allowed' }}
-                    disabled={!validation.valid}
-                    onClick={() => closeGateAndAdvance('objective')}
-                  >
-                    Close Gate 3
-                  </button>
-                ) : isEditing && (
-                  <button
-                    style={{ marginTop: '1rem', padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: hasChanges && validation.valid ? '#4caf50' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: hasChanges && validation.valid ? 'pointer' : 'not-allowed' }}
-                    disabled={!hasChanges || !validation.valid}
-                    onClick={saveChanges}
-                  >
-                    Change Problem
-                  </button>
-                )}
-              </>
-            );
-          })()}
+          {currentGate === 'problem' ? (
+            <button
+              style={{
+                padding: '0.75rem 1.5rem',
+                fontSize: '1rem',
+                backgroundColor: problemText.trim() ? '#1976d2' : '#ccc',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: problemText.trim() ? 'pointer' : 'not-allowed'
+              }}
+              disabled={!problemText.trim()}
+              onClick={() => closeGateAndAdvance('objective')}
+            >
+              Close Gate 3
+            </button>
+          ) : (
+            <button
+              style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              onClick={() => setExpandedGate(currentGate)}
+            >
+              Done
+            </button>
+          )}
         </section>
       )}
 
@@ -1149,64 +1336,57 @@ export default function Home() {
       {expandedGate === 'objective' && prDetails && !roleAlreadyAttested && (
         <section style={{ padding: '1.5rem', backgroundColor: '#fff', borderRadius: '8px', marginBottom: '1.5rem', border: '2px solid #1976d2' }}>
           <h2>Gate 4: Objective</h2>
-          <p style={{ fontSize: '0.9rem', color: '#333', marginBottom: '0.5rem' }}>
-            What outcome are you approving this change to achieve?
-          </p>
-          <p style={{ fontSize: '0.8rem', color: '#999', marginBottom: '1rem' }}>
-            This text is not transmitted, signed, or enforced.
+          <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+            Articulate the intended outcome from the perspective of {ROLE_INFO[selectedRole].label}.
           </p>
 
-          {(() => {
-            const isEditing = isGateCompleted('objective');
-            const displayText = isEditing ? objectiveDraft : objectiveText;
-            const setDisplayText = isEditing ? setObjectiveDraft : setObjectiveText;
-            const validation = validateGateText(displayText, 'objective');
-            const hasChanges = isEditing && objectiveDraft !== objectiveText;
+          <div style={{ padding: '0.75rem 1rem', backgroundColor: '#e3f2fd', borderRadius: '4px', marginBottom: '1rem', border: '1px solid #90caf9' }}>
+            <strong>Attesting as:</strong> {ROLE_INFO[selectedRole].label}
+          </div>
 
-            const saveChanges = () => {
-              setObjectiveText(objectiveDraft);
-              setExpandedGate(currentGate);
-            };
+          <textarea
+            value={objectiveText}
+            onChange={(e) => setObjectiveText(e.target.value)}
+            placeholder={`What is the intended outcome for ${ROLE_INFO[selectedRole].label}?`}
+            style={{
+              width: '100%',
+              minHeight: '150px',
+              padding: '0.75rem',
+              fontSize: '0.95rem',
+              borderRadius: '4px',
+              border: '1px solid #ccc',
+              boxSizing: 'border-box',
+              resize: 'vertical',
+              marginBottom: '1rem'
+            }}
+          />
 
-            return (
-              <>
-                <textarea
-                  value={displayText}
-                  onChange={(e) => setDisplayText(e.target.value)}
-                  placeholder="Describe the objective..."
-                  style={{ width: '100%', padding: '0.75rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box', minHeight: '100px', resize: 'vertical' }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                  <span style={{ fontSize: '0.8rem', color: !validation.valid && displayText.length > 0 ? '#f44336' : '#666' }}>
-                    {validation.error || ''}
-                  </span>
-                  <span style={{ fontSize: '0.8rem', color: displayText.length < 20 || displayText.length > 240 ? '#f44336' : '#666' }}>
-                    {displayText.length}/240
-                  </span>
-                </div>
+          {renderAIAssistance('objective')}
 
-                {renderAIAssistance('objective')}
-
-                {currentGate === 'objective' ? (
-                  <button
-                    style={{ marginTop: '1rem', padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: validation.valid ? '#1976d2' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: validation.valid ? 'pointer' : 'not-allowed' }}
-                    disabled={!validation.valid}
-                    onClick={() => closeGateAndAdvance('tradeoffs')}
-                  >
-                    Close Gate 4
-                  </button>
-                ) : isEditing && (
-                  <button
-                    style={{ marginTop: '1rem', padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: hasChanges && validation.valid ? '#4caf50' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: hasChanges && validation.valid ? 'pointer' : 'not-allowed' }}
-                    disabled={!hasChanges || !validation.valid}
-                    onClick={saveChanges}
-                  >
-                    Change Objective
-                  </button>
-                )}
-              </>
-            );
-          })()}
+          {currentGate === 'objective' ? (
+            <button
+              style={{
+                padding: '0.75rem 1.5rem',
+                fontSize: '1rem',
+                backgroundColor: objectiveText.trim() ? '#1976d2' : '#ccc',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: objectiveText.trim() ? 'pointer' : 'not-allowed'
+              }}
+              disabled={!objectiveText.trim()}
+              onClick={() => closeGateAndAdvance('tradeoffs')}
+            >
+              Close Gate 4
+            </button>
+          ) : (
+            <button
+              style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              onClick={() => setExpandedGate(currentGate)}
+            >
+              Done
+            </button>
+          )}
         </section>
       )}
 
@@ -1214,70 +1394,57 @@ export default function Home() {
       {expandedGate === 'tradeoffs' && prDetails && !roleAlreadyAttested && (
         <section style={{ padding: '1.5rem', backgroundColor: '#fff', borderRadius: '8px', marginBottom: '1.5rem', border: '2px solid #1976d2' }}>
           <h2>Gate 5: Tradeoffs</h2>
+          <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+            Articulate the tradeoffs you are accepting for {ROLE_INFO[selectedRole].label}.
+          </p>
 
           <div style={{ padding: '0.75rem 1rem', backgroundColor: '#e3f2fd', borderRadius: '4px', marginBottom: '1rem', border: '1px solid #90caf9' }}>
-            <strong>You are approving as:</strong> {ROLE_INFO[selectedRole].label}<br />
-            <strong>Execution path:</strong> {executionPath === 'canary' ? 'Canary (gradual rollout)' : 'Full (immediate deployment)'}
+            <strong>Attesting as:</strong> {ROLE_INFO[selectedRole].label}
           </div>
 
-          <p style={{ fontSize: '0.9rem', color: '#333', marginBottom: '0.5rem' }}>
-            What tradeoffs are you explicitly accepting by approving this change?
-          </p>
-          <p style={{ fontSize: '0.8rem', color: '#999', marginBottom: '1rem' }}>
-            This is your acknowledgment of risk. Execution constraints are defined separately.
-          </p>
+          <textarea
+            value={tradeoffsText}
+            onChange={(e) => setTradeoffsText(e.target.value)}
+            placeholder={`What tradeoffs are you accepting as ${ROLE_INFO[selectedRole].label}?`}
+            style={{
+              width: '100%',
+              minHeight: '150px',
+              padding: '0.75rem',
+              fontSize: '0.95rem',
+              borderRadius: '4px',
+              border: '1px solid #ccc',
+              boxSizing: 'border-box',
+              resize: 'vertical',
+              marginBottom: '1rem'
+            }}
+          />
 
-          {(() => {
-            const isEditing = isGateCompleted('tradeoffs');
-            const displayText = isEditing ? tradeoffsDraft : tradeoffsText;
-            const setDisplayText = isEditing ? setTradeoffsDraft : setTradeoffsText;
-            const validation = validateGateText(displayText, 'tradeoffs');
-            const hasChanges = isEditing && tradeoffsDraft !== tradeoffsText;
+          {renderAIAssistance('tradeoffs')}
 
-            const saveChanges = () => {
-              setTradeoffsText(tradeoffsDraft);
-              setExpandedGate(currentGate);
-            };
-
-            return (
-              <>
-                <textarea
-                  value={displayText}
-                  onChange={(e) => setDisplayText(e.target.value)}
-                  placeholder={`As ${ROLE_INFO[selectedRole].label}, I accept...`}
-                  style={{ width: '100%', padding: '0.75rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box', minHeight: '100px', resize: 'vertical' }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                  <span style={{ fontSize: '0.8rem', color: !validation.valid && displayText.length > 0 ? '#f44336' : '#666' }}>
-                    {validation.error || ''}
-                  </span>
-                  <span style={{ fontSize: '0.8rem', color: displayText.length < 20 || displayText.length > 240 ? '#f44336' : '#666' }}>
-                    {displayText.length}/240
-                  </span>
-                </div>
-
-                {renderAIAssistance('tradeoffs')}
-
-                {currentGate === 'tradeoffs' ? (
-                  <button
-                    style={{ marginTop: '1rem', padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: validation.valid ? '#1976d2' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: validation.valid ? 'pointer' : 'not-allowed' }}
-                    disabled={!validation.valid}
-                    onClick={() => closeGateAndAdvance('commitment')}
-                  >
-                    Close Gate 5
-                  </button>
-                ) : isEditing && (
-                  <button
-                    style={{ marginTop: '1rem', padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: hasChanges && validation.valid ? '#4caf50' : '#ccc', color: 'white', border: 'none', borderRadius: '4px', cursor: hasChanges && validation.valid ? 'pointer' : 'not-allowed' }}
-                    disabled={!hasChanges || !validation.valid}
-                    onClick={saveChanges}
-                  >
-                    Change Tradeoffs
-                  </button>
-                )}
-              </>
-            );
-          })()}
+          {currentGate === 'tradeoffs' ? (
+            <button
+              style={{
+                padding: '0.75rem 1.5rem',
+                fontSize: '1rem',
+                backgroundColor: tradeoffsText.trim() ? '#1976d2' : '#ccc',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: tradeoffsText.trim() ? 'pointer' : 'not-allowed'
+              }}
+              disabled={!tradeoffsText.trim()}
+              onClick={() => closeGateAndAdvance('commitment')}
+            >
+              Close Gate 5
+            </button>
+          ) : (
+            <button
+              style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              onClick={() => setExpandedGate(currentGate)}
+            >
+              Done
+            </button>
+          )}
         </section>
       )}
 
@@ -1291,21 +1458,21 @@ export default function Home() {
 
           <div style={{ backgroundColor: '#1a1a2e', color: '#e0e0e0', padding: '1.5rem', borderRadius: '8px', marginBottom: '1.5rem', fontFamily: 'monospace', fontSize: '0.9rem' }}>
             <p style={{ color: '#4fc3f7', marginBottom: '1rem', fontWeight: 'bold' }}>You are about to sign:</p>
-            <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Profile:</strong> deploy-gate@0.2</p>
+            <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Profile:</strong> {decisionFileResult?.decisionFile?.profile || 'deploy-gate@0.3'}</p>
             <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Repo:</strong> {prDetails.repo}</p>
             <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Commit:</strong> {prDetails.head.sha.slice(0, 12)}...</p>
             <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Environment:</strong> {targetEnv}</p>
-            <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Execution path:</strong> {executionPath}</p>
-            <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Role:</strong> {ROLE_INFO[selectedRole].label}</p>
+            <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Execution path:</strong> {decisionFileResult?.decisionFile?.execution_path || executionPath}</p>
+            <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Domain:</strong> {ROLE_INFO[selectedRole].label}</p>
             <p style={{ margin: '0.5rem 0' }}>&#8226; <strong>Gates closed:</strong> 1-5 &#10003;</p>
           </div>
 
           <div style={{ backgroundColor: '#fff8e1', border: '1px solid #ffcc02', padding: '1rem', borderRadius: '4px', marginBottom: '1.5rem' }}>
             <p style={{ margin: 0, fontWeight: 'bold', color: '#f57c00' }}>
-              Your written explanations are not included in the attestation.
+              Your attestation binds your domain's disclosure hash.
             </p>
             <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem', color: '#666' }}>
-              By signing, you authorize the action above &#8212; not your reasoning.
+              By signing, you confirm you reviewed the disclosure for {ROLE_INFO[selectedRole].label} and authorize this action.
             </p>
           </div>
 
@@ -1365,7 +1532,47 @@ export default function Home() {
             <button
               style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', backgroundColor: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
               onClick={() => {
-                const attestationText = `## HAP Deploy Demo Attestation
+                // Determine if this is v0.3 (has domain_disclosure_hash) or v0.2
+                const isV03 = 'domain_disclosure_hash' in attestationResult;
+                const profileId = decisionFileResult?.decisionFile?.profile || 'deploy-gate@0.2';
+                const execPath = decisionFileResult?.decisionFile?.execution_path || executionPath;
+
+                let attestationText: string;
+                if (isV03) {
+                  // v0.3 format
+                  attestationText = `## HAP Deploy Demo Attestation (v0.3)
+
+**Profile:** \`${profileId}\`
+**Domain:** \`${selectedRole}\` (${ROLE_INFO[selectedRole].label})
+**Execution Path:** \`${execPath}\`
+**Environment:** \`${targetEnv}\`
+**Commit:** \`${prDetails?.head.sha}\`
+
+### Gates Closed
+- [x] Gate 1: Frame validated (decision file loaded)
+- [x] Gate 2: Decision Owner confirmed (${ROLE_INFO[selectedRole].label})
+- [x] Gate 3: Disclosure reviewed and validated
+- [x] Gate 4: Commitment signed
+
+---
+
+\`\`\`
+---BEGIN HAP_ATTESTATION v=1---
+profile=${profileId}
+domain=${selectedRole}
+env=${targetEnv}
+path=${execPath}
+sha=${prDetails?.head.sha}
+frame_hash=${attestationResult.frame_hash}
+domain_disclosure_hash=${(attestationResult as any).domain_disclosure_hash}
+blob=${attestationResult.attestation}
+---END HAP_ATTESTATION---
+\`\`\`
+
+*Attestation expires: ${new Date(attestationResult.expires_at).toLocaleString()}*`;
+                } else {
+                  // v0.2 format
+                  attestationText = `## HAP Deploy Demo Attestation
 
 **Profile:** \`deploy-gate@0.2\`
 **Role:** \`${selectedRole}\` (${ROLE_INFO[selectedRole].label})
@@ -1397,6 +1604,7 @@ blob=${attestationResult.attestation}
 \`\`\`
 
 *Attestation expires: ${new Date(attestationResult.expires_at).toLocaleString()}*`;
+                }
                 navigator.clipboard.writeText(attestationText);
                 alert('Attestation copied to clipboard!');
               }}
@@ -1408,7 +1616,24 @@ blob=${attestationResult.attestation}
           <details>
             <summary style={{ cursor: 'pointer', color: '#666' }}>View raw attestation block</summary>
             <pre style={{ backgroundColor: '#263238', color: '#aed581', padding: '1rem', borderRadius: '4px', overflow: 'auto', fontSize: '0.85rem', whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: '0.5rem' }}>
-{`---BEGIN HAP_ATTESTATION v=1---
+{(() => {
+  const isV03 = 'domain_disclosure_hash' in attestationResult;
+  const profileId = decisionFileResult?.decisionFile?.profile || 'deploy-gate@0.2';
+  const execPath = decisionFileResult?.decisionFile?.execution_path || executionPath;
+
+  if (isV03) {
+    return `---BEGIN HAP_ATTESTATION v=1---
+profile=${profileId}
+domain=${selectedRole}
+env=${targetEnv}
+path=${execPath}
+sha=${prDetails?.head.sha}
+frame_hash=${attestationResult.frame_hash}
+domain_disclosure_hash=${(attestationResult as any).domain_disclosure_hash}
+blob=${attestationResult.attestation}
+---END HAP_ATTESTATION---`;
+  } else {
+    return `---BEGIN HAP_ATTESTATION v=1---
 profile=deploy-gate@0.2
 role=${selectedRole}
 env=${targetEnv}
@@ -1417,7 +1642,9 @@ sha=${prDetails?.head.sha}
 frame_hash=${attestationResult.frame_hash}
 disclosure_hash=${attestationResult.disclosure_hash}
 blob=${attestationResult.attestation}
----END HAP_ATTESTATION---`}
+---END HAP_ATTESTATION---`;
+  }
+})()}
             </pre>
           </details>
         </section>

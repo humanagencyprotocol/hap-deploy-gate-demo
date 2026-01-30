@@ -4,7 +4,7 @@
 
 import { createHash } from 'crypto';
 import * as ed from '@noble/ed25519';
-import type { AttestationBlock, Attestation, AttestationPayload } from './types';
+import type { AttestationBlock, AttestationBlockV02, AttestationBlockV03, Attestation, AttestationPayload } from './types';
 
 /**
  * Error codes for attestation validation failures
@@ -34,14 +34,27 @@ export class AttestationError extends Error {
 /**
  * Parses an attestation block from a PR comment body.
  *
- * Expected format:
+ * v0.2 format:
  * ---BEGIN HAP_ATTESTATION v=1---
  * profile=deploy-gate@0.2
+ * role=engineering
  * env=prod
  * path=deploy-prod-canary
  * sha=<HEAD_SHA>
  * frame_hash=<sha256:...>
  * disclosure_hash=<sha256:...>
+ * blob=<BASE64URL_ATTESTATION>
+ * ---END HAP_ATTESTATION---
+ *
+ * v0.3 format:
+ * ---BEGIN HAP_ATTESTATION v=1---
+ * profile=deploy-gate@0.3
+ * domain=engineering
+ * env=prod
+ * path=deploy-prod-canary
+ * sha=<HEAD_SHA>
+ * frame_hash=<sha256:...>
+ * domain_disclosure_hash=<sha256:...>
  * blob=<BASE64URL_ATTESTATION>
  * ---END HAP_ATTESTATION---
  *
@@ -85,38 +98,95 @@ export function parseAttestationBlock(commentBody: string): AttestationBlock | n
     data[key] = value;
   }
 
-  // Validate required keys
-  const requiredKeys = ['profile', 'env', 'path', 'sha', 'frame_hash', 'disclosure_hash', 'blob'];
-  for (const key of requiredKeys) {
-    if (!data[key]) {
-      return null;
+  // Detect version based on keys
+  const isV03 = data.domain !== undefined && data.domain_disclosure_hash !== undefined;
+  const isV02 = data.role !== undefined && data.disclosure_hash !== undefined;
+
+  if (isV03) {
+    // v0.3 format
+    const requiredKeys = ['profile', 'domain', 'env', 'path', 'sha', 'frame_hash', 'domain_disclosure_hash', 'blob'];
+    for (const key of requiredKeys) {
+      if (!data[key]) {
+        return null;
+      }
     }
+    return {
+      profile: data.profile,
+      domain: data.domain,
+      env: data.env,
+      path: data.path,
+      sha: data.sha,
+      frame_hash: data.frame_hash,
+      domain_disclosure_hash: data.domain_disclosure_hash,
+      blob: data.blob,
+    } as AttestationBlockV03;
+  } else if (isV02) {
+    // v0.2 format
+    const requiredKeys = ['profile', 'role', 'env', 'path', 'sha', 'frame_hash', 'disclosure_hash', 'blob'];
+    for (const key of requiredKeys) {
+      if (!data[key]) {
+        return null;
+      }
+    }
+    return {
+      profile: data.profile,
+      role: data.role,
+      env: data.env,
+      path: data.path,
+      sha: data.sha,
+      frame_hash: data.frame_hash,
+      disclosure_hash: data.disclosure_hash,
+      blob: data.blob,
+    } as AttestationBlockV02;
   }
 
-  return {
-    profile: data.profile,
-    env: data.env,
-    path: data.path,
-    sha: data.sha,
-    frame_hash: data.frame_hash,
-    disclosure_hash: data.disclosure_hash,
-    blob: data.blob,
-  };
+  return null;
+}
+
+/**
+ * Type guard for v0.2 attestation block
+ */
+export function isAttestationBlockV02(block: AttestationBlock): block is AttestationBlockV02 {
+  return 'role' in block && 'disclosure_hash' in block;
+}
+
+/**
+ * Type guard for v0.3 attestation block
+ */
+export function isAttestationBlockV03(block: AttestationBlock): block is AttestationBlockV03 {
+  return 'domain' in block && 'domain_disclosure_hash' in block;
 }
 
 /**
  * Formats an attestation block for posting to a PR comment.
+ * Handles both v0.2 and v0.3 formats.
  */
 export function formatAttestationBlock(block: AttestationBlock): string {
-  return `---BEGIN HAP_ATTESTATION v=1---
+  if (isAttestationBlockV03(block)) {
+    return `---BEGIN HAP_ATTESTATION v=1---
 profile=${block.profile}
+domain=${block.domain}
 env=${block.env}
 path=${block.path}
 sha=${block.sha}
 frame_hash=${block.frame_hash}
-disclosure_hash=${block.disclosure_hash}
+domain_disclosure_hash=${block.domain_disclosure_hash}
 blob=${block.blob}
 ---END HAP_ATTESTATION---`;
+  } else {
+    // v0.2 format
+    const v02Block = block as AttestationBlockV02;
+    return `---BEGIN HAP_ATTESTATION v=1---
+profile=${v02Block.profile}
+role=${v02Block.role}
+env=${v02Block.env}
+path=${v02Block.path}
+sha=${v02Block.sha}
+frame_hash=${v02Block.frame_hash}
+disclosure_hash=${v02Block.disclosure_hash}
+blob=${v02Block.blob}
+---END HAP_ATTESTATION---`;
+  }
 }
 
 /**

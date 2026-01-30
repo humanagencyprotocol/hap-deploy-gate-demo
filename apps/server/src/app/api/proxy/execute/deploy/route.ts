@@ -10,6 +10,7 @@ import {
   attestationId,
   AttestationError,
   AttestationErrorCodes,
+  DEPLOY_GATE_PROFILE,
 } from '@hap-demo/core';
 
 interface DeployRequest {
@@ -78,7 +79,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Recompute frame_hash from payload params
+    // Recompute frame_hash from payload params using the profile schema
     const expectedFrameHash = computeFrameHash({
       repo: body.payload.params.repo,
       sha: body.payload.params.sha,
@@ -86,7 +87,7 @@ export async function POST(request: NextRequest) {
       profile: body.payload.params.profile_id,
       path: body.payload.params.execution_path,
       disclosure_hash: body.payload.params.disclosure_hash,
-    });
+    }, DEPLOY_GATE_PROFILE);
 
     // Verify frame_hash matches
     verifyFrameHash(attestation, expectedFrameHash);

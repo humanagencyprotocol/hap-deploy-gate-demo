@@ -1,12 +1,16 @@
 /**
- * Disclosure Canonicalization
+ * Disclosure Canonicalization and Validation
  *
  * Disclosure represents what the human reviewed before approving.
  * The hash binds the attestation to the specific review content.
+ *
+ * Disclosures contain:
+ * - Shared context (repo, sha, changed files, risk flags)
+ * - Per-domain content (problem, objective, tradeoffs for each required domain)
  */
 
 import { createHash } from 'crypto';
-import type { Disclosure } from './types';
+import type { Disclosure, DomainDisclosure, Profile } from './types';
 
 /**
  * Canonicalizes a path by removing leading ./, .., trailing slashes, and duplicate slashes.
@@ -41,28 +45,99 @@ export function sortSetField(values: string[]): string[] {
 }
 
 /**
+ * Validates a domain disclosure against the profile's disclosure schema
+ */
+export function validateDomainDisclosure(
+  domain: string,
+  disclosure: DomainDisclosure,
+  profile: Profile
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const domainSchema = profile.disclosureSchema.domains[domain];
+
+  if (!domainSchema) {
+    errors.push(`Unknown domain "${domain}" not defined in profile ${profile.id}`);
+    return { valid: false, errors };
+  }
+
+  // Validate each required field
+  for (const [fieldName, fieldDef] of Object.entries(domainSchema)) {
+    const value = disclosure[fieldName as keyof DomainDisclosure];
+
+    if (!value) {
+      errors.push(`Missing required field "${fieldName}" for domain "${domain}"`);
+      continue;
+    }
+
+    if (fieldDef.minLength && value.length < fieldDef.minLength) {
+      errors.push(
+        `${domain}.${fieldName}: must be at least ${fieldDef.minLength} characters (got ${value.length})`
+      );
+    }
+
+    if (fieldDef.maxLength && value.length > fieldDef.maxLength) {
+      errors.push(
+        `${domain}.${fieldName}: must be at most ${fieldDef.maxLength} characters (got ${value.length})`
+      );
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validates a complete disclosure against the profile schema
+ */
+export function validateDisclosure(
+  disclosure: Disclosure,
+  requiredDomains: string[],
+  profile: Profile
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  // Check all required domains are present
+  for (const domain of requiredDomains) {
+    if (!disclosure.domains[domain]) {
+      errors.push(`Missing disclosure for required domain: ${domain}`);
+      continue;
+    }
+
+    const domainResult = validateDomainDisclosure(domain, disclosure.domains[domain], profile);
+    errors.push(...domainResult.errors);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
  * Builds the canonical disclosure object.
- * - Keys are sorted lexicographically
+ * - Keys are sorted lexicographically at each level
  * - Set-typed fields (changed_paths, risk_flags) are sorted
+ * - Domains are sorted alphabetically
  * - No insignificant whitespace
  */
 export function canonicalDisclosure(disclosure: Disclosure): string {
+  // Sort domains alphabetically
+  const sortedDomains = Object.keys(disclosure.domains).sort();
+
   const canonical = {
     changed_paths: canonicalizePaths(disclosure.changed_paths),
+    domains: Object.fromEntries(
+      sortedDomains.map((domain) => [
+        domain,
+        {
+          objective: disclosure.domains[domain].objective,
+          problem: disclosure.domains[domain].problem,
+          tradeoffs: disclosure.domains[domain].tradeoffs,
+        },
+      ])
+    ),
     repo: disclosure.repo,
     risk_flags: sortSetField(disclosure.risk_flags),
     sha: disclosure.sha,
   };
 
-  // JSON.stringify with sorted keys (object is already in correct order due to alphabetical property names)
-  // But to be safe, we explicitly sort
-  const sortedKeys = Object.keys(canonical).sort();
-  const sorted: Record<string, unknown> = {};
-  for (const key of sortedKeys) {
-    sorted[key] = canonical[key as keyof typeof canonical];
-  }
-
-  return JSON.stringify(sorted);
+  return JSON.stringify(canonical);
 }
 
 /**

@@ -1,56 +1,69 @@
 /**
  * Frame Canonicalization
  *
- * Canonical frame string format (Deploy Gate Profile v0.2):
- *
- * repo=<repo_slug>
- * sha=<commit_sha>
- * env=prod
- * profile=deploy-gate@0.2
- * path=<execution_path>
- * disclosure_hash=<sha256:...>
+ * Frames are canonicalized according to the Profile's frameSchema.
+ * The Profile defines:
+ * - keyOrder: the canonical order of keys for hashing
+ * - fields: validation patterns and requirements for each field
  */
 
 import { createHash } from 'crypto';
-import type { FrameParams } from './types';
+import type { FrameParams, Profile } from './types';
 
 /**
- * Field format validators per Deploy Gate Profile v0.2
- */
-const FIELD_PATTERNS = {
-  repo: /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/,
-  sha: /^[a-f0-9]{40}$/,
-  env: /^(prod|staging)$/,
-  profile: /^[a-z0-9_-]+@[0-9]+\.[0-9]+$/,
-  path: /^[a-z0-9_-]+$/,
-  disclosure_hash: /^sha256:[a-f0-9]{64}$/,
-} as const;
-
-/**
- * Validates a frame parameter against its field format
+ * Validates a frame parameter against the profile's field definition
  */
 export function validateFrameField(
-  field: keyof typeof FIELD_PATTERNS,
-  value: string
+  field: string,
+  value: string,
+  profile: Profile
 ): { valid: boolean; error?: string } {
-  const pattern = FIELD_PATTERNS[field];
+  const fieldDef = profile.frameSchema.fields[field];
+
+  if (!fieldDef) {
+    return {
+      valid: false,
+      error: `Unknown field "${field}" not defined in profile ${profile.id}`,
+    };
+  }
+
+  const pattern = new RegExp(fieldDef.pattern);
   if (!pattern.test(value)) {
     return {
       valid: false,
-      error: `Invalid ${field}: "${value}" does not match pattern ${pattern}`,
+      error: `Invalid ${field}: "${value}" does not match pattern ${fieldDef.pattern}`,
     };
   }
+
+  if (fieldDef.allowedValues && !fieldDef.allowedValues.includes(value)) {
+    return {
+      valid: false,
+      error: `Invalid ${field}: "${value}" not in allowed values [${fieldDef.allowedValues.join(', ')}]`,
+    };
+  }
+
   return { valid: true };
 }
 
 /**
- * Validates all frame parameters
+ * Validates all frame parameters against the profile schema
  */
-export function validateFrameParams(params: FrameParams): { valid: boolean; errors: string[] } {
+export function validateFrameParams(
+  params: FrameParams,
+  profile: Profile
+): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
+  // Check all required fields are present
+  for (const [fieldName, fieldDef] of Object.entries(profile.frameSchema.fields)) {
+    if (fieldDef.required && !(fieldName in params)) {
+      errors.push(`Missing required field: ${fieldName}`);
+    }
+  }
+
+  // Validate each provided field
   for (const [field, value] of Object.entries(params)) {
-    const result = validateFrameField(field as keyof typeof FIELD_PATTERNS, value);
+    const result = validateFrameField(field, value, profile);
     if (!result.valid && result.error) {
       errors.push(result.error);
     }
@@ -61,25 +74,20 @@ export function validateFrameParams(params: FrameParams): { valid: boolean; erro
 
 /**
  * Builds the canonical frame string from parameters.
- * Keys are in fixed order per Deploy Gate Profile v0.2.
+ * Keys are ordered according to the profile's keyOrder.
  *
  * @throws Error if any field fails validation
  */
-export function canonicalFrame(params: FrameParams): string {
-  const validation = validateFrameParams(params);
+export function canonicalFrame(params: FrameParams, profile: Profile): string {
+  const validation = validateFrameParams(params, profile);
   if (!validation.valid) {
     throw new Error(`Invalid frame parameters: ${validation.errors.join('; ')}`);
   }
 
-  // Fixed key order per Deploy Gate Profile v0.2
-  const lines = [
-    `repo=${params.repo}`,
-    `sha=${params.sha}`,
-    `env=${params.env}`,
-    `profile=${params.profile}`,
-    `path=${params.path}`,
-    `disclosure_hash=${params.disclosure_hash}`,
-  ];
+  // Use profile-defined key order
+  const lines = profile.frameSchema.keyOrder.map(
+    (key) => `${key}=${params[key as keyof FrameParams]}`
+  );
 
   return lines.join('\n');
 }
@@ -97,6 +105,6 @@ export function frameHash(canonicalFrameString: string): string {
 /**
  * Convenience function: builds canonical frame and computes hash in one step.
  */
-export function computeFrameHash(params: FrameParams): string {
-  return frameHash(canonicalFrame(params));
+export function computeFrameHash(params: FrameParams, profile: Profile): string {
+  return frameHash(canonicalFrame(params, profile));
 }

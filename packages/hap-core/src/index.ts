@@ -8,3 +8,4 @@ export * from './frame';
 export * from './disclosure';
 export * from './attestation';
 export * from './types';
+export * from './profiles';
